@@ -1,0 +1,33 @@
+"""Prospects-relevant enums."""
+
+from services.common.enums import (
+    CHANNELS,
+    FUNNEL_STAGES,
+    HEAT_LEVELS,
+    MERGE_MATCH_STRATEGIES,
+    MERGE_REVIEW_STATUSES,
+    get_label,
+    get_value,
+    reverse,
+)
+
+FUNNEL_STAGES_REVERSE = reverse(FUNNEL_STAGES)
+CHANNELS_REVERSE = reverse(CHANNELS)
+HEAT_LEVELS_REVERSE = reverse(HEAT_LEVELS)
+MERGE_MATCH_STRATEGIES_REVERSE = reverse(MERGE_MATCH_STRATEGIES)
+MERGE_REVIEW_STATUSES_REVERSE = reverse(MERGE_REVIEW_STATUSES)
+
+__all__ = [
+    "FUNNEL_STAGES",
+    "FUNNEL_STAGES_REVERSE",
+    "CHANNELS",
+    "CHANNELS_REVERSE",
+    "HEAT_LEVELS",
+    "HEAT_LEVELS_REVERSE",
+    "MERGE_MATCH_STRATEGIES",
+    "MERGE_MATCH_STRATEGIES_REVERSE",
+    "MERGE_REVIEW_STATUSES",
+    "MERGE_REVIEW_STATUSES_REVERSE",
+    "get_label",
+    "get_value",
+]

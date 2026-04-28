@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: thh-lead-engine-api
+    env_file:
+      - .env
+    ports:
+      - "5050:5050"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5050/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build: .
+    container_name: thh-lead-engine-worker
+    env_file:
+      - .env
+    command: ["arq", "workers.settings.WorkerSettings"]
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: thh-lead-engine-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

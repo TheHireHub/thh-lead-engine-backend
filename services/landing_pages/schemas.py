@@ -1,0 +1,52 @@
+"""Pydantic schemas for landing pages, variants, visits."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class LandingPageCreate(BaseModel):
+    slug: str = Field(min_length=1, max_length=255)
+    prospect_id: Optional[int] = None
+    company_id: Optional[int] = None
+    template_key: str = Field(default="classic", max_length=50)
+    source_campaign_id: Optional[int] = None
+    default_content_json: Optional[dict] = None
+
+
+class LandingPageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    slug: str
+    prospect_id: Optional[int]
+    company_id: Optional[int]
+    template_key: str
+    source_campaign_id: Optional[int]
+    default_content_json: Optional[dict]
+    visit_count: int
+    last_visit_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+
+class VariantCreate(BaseModel):
+    landing_page_id: int
+    variant_key: str = Field(max_length=50)
+    content_json: dict
+    weight: int = Field(default=100, ge=0, le=1000)
+    status: int = Field(default=0, ge=0, le=2)
+
+
+class VisitCreate(BaseModel):
+    landing_page_id: int
+    landing_page_variant_id: Optional[int] = None
+    visitor_id: str = Field(min_length=1, max_length=64)
+    referrer: Optional[str] = None
+    utm_source: Optional[str] = None
+    utm_medium: Optional[str] = None
+    utm_campaign: Optional[str] = None
+    utm_content: Optional[str] = None
+    utm_term: Optional[str] = None
