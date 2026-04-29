@@ -8,6 +8,26 @@ The single source of truth for schema and architecture is
 [`docs/SCHEMA.md`](./docs/SCHEMA.md). Every section reference below
 (`§3`, `§7.21`, `Arch-29`, etc.) maps into that doc.
 
+## graphify knowledge graph (use this FIRST)
+
+This repo ships with a knowledge graph at `graphify-out/` that maps every
+backend route, handler, CRUD function, service, and model.
+
+**Before answering any architecture, "where does X live", or "how does Y work"
+question, check the graph. It is faster and more complete than grep.**
+
+### Entry points
+
+- `graphify-out/GRAPH_REPORT.md` — god nodes, community labels, executive summary
+- `graphify-out/wiki/index.md` — agent-crawlable markdown articles, one per community
+- `graphify-out/graph.html` — interactive browser visualization
+- `graphify-out/graph.json` — raw graph (576 nodes · 1173 edges · 66 communities)
+
+### Regenerating
+
+After code changes run `/graphify /Users/lakshayjain/thh/thh-lead-engine-backend --update`
+(AST re-extraction, no LLM cost for code-only changes).
+
 ## Stack
 
 - **FastAPI** + **SQLAlchemy 2.0 (async)** + **MySQL** (aiomysql)

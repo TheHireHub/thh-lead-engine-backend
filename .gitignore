@@ -12,3 +12,10 @@ env/
 .DS_Store
 *.sqlite3
 setup_database.log
+
+# graphify — graphify-out/ IS committed (cross-repo knowledge graph)
+# but the local interpreter path is machine-specific
+graphify-out/.graphify_python
+graphify-output/
+.graphify/
+*.graphify.json
