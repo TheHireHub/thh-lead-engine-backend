@@ -77,3 +77,12 @@ class AdminUserCRUD:
 
         user.deleted_at = datetime.now(timezone.utc)
         await db.commit()
+
+    @staticmethod
+    async def update_last_login(db: AsyncSession, user: AdminUser) -> AdminUser:
+        from datetime import datetime, timezone
+
+        user.last_login_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(user)
+        return user
