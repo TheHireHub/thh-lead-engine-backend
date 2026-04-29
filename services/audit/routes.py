@@ -26,3 +26,22 @@ async def for_entity(
 async def for_actor(actor_user_id: int, limit: int = 100, db: AsyncSession = Depends(get_db)) -> dict:
     rows = await AuditLogCRUD.list_for_actor(db, actor_user_id, limit=limit)
     return ok([AuditLogOut.model_validate(r).model_dump() for r in rows])
+
+
+@router.get("/by-action/{action}")
+async def for_action(
+    action: str,
+    limit: int = 100,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Search by action string (e.g. auto_marked_not_interested, promote_to_thh, gdpr_erase)."""
+    rows = await AuditLogCRUD.list_by_action(db, action, limit=limit, offset=offset)
+    return ok([AuditLogOut.model_validate(r).model_dump() for r in rows])
+
+
+@router.get("/recent")
+async def recent(limit: int = 50, db: AsyncSession = Depends(get_db)) -> dict:
+    """Last N audit events across all entities. Powers the future Audit Log admin page."""
+    rows = await AuditLogCRUD.list_recent(db, limit=limit)
+    return ok([AuditLogOut.model_validate(r).model_dump() for r in rows])

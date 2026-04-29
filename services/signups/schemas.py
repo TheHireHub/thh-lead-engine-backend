@@ -35,3 +35,7 @@ class SignupOut(BaseModel):
     visitor_id: Optional[str]
     otp_verified_at: Optional[datetime]
     created_at: datetime
+
+
+class OtpVerifyPayload(BaseModel):
+    otp_code: str = Field(min_length=4, max_length=12)
