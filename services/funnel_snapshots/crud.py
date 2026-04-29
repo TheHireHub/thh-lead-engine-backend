@@ -35,15 +35,58 @@ class FunnelSnapshotCRUD:
         channel: Optional[int] = None,
         owner_user_id: Optional[int] = None,
     ) -> None:
-        stmt = mysql_insert(FunnelDailySnapshot).values(
-            snapshot_date=snapshot_date,
-            stage=stage,
-            channel=channel,
-            owner_user_id=owner_user_id,
-            prospect_count=prospect_count,
+        """
+        Idempotent upsert into funnel_daily_snapshots.
+
+        The table's uk_fds_dimension UNIQUE includes nullable columns
+        (channel, owner_user_id). MySQL UNIQUE treats multiple NULLs as
+        distinct, so ON DUPLICATE KEY UPDATE doesn't catch rollup rows
+        where channel/owner are NULL. For those cases we emulate the
+        upsert manually via SELECT-then-UPDATE-or-INSERT.
+        """
+        if channel is not None and owner_user_id is not None:
+            # Both columns non-null — the unique key works as expected.
+            stmt = mysql_insert(FunnelDailySnapshot).values(
+                snapshot_date=snapshot_date,
+                stage=stage,
+                channel=channel,
+                owner_user_id=owner_user_id,
+                prospect_count=prospect_count,
+            )
+            stmt = stmt.on_duplicate_key_update(prospect_count=prospect_count)
+            await db.execute(stmt)
+            await db.commit()
+            return
+
+        # Manual upsert for NULL-containing keys.
+        find = select(FunnelDailySnapshot).where(
+            FunnelDailySnapshot.snapshot_date == snapshot_date,
+            FunnelDailySnapshot.stage == stage,
         )
-        stmt = stmt.on_duplicate_key_update(prospect_count=prospect_count)
-        await db.execute(stmt)
+        find = (
+            find.where(FunnelDailySnapshot.channel == channel)
+            if channel is not None
+            else find.where(FunnelDailySnapshot.channel.is_(None))
+        )
+        find = (
+            find.where(FunnelDailySnapshot.owner_user_id == owner_user_id)
+            if owner_user_id is not None
+            else find.where(FunnelDailySnapshot.owner_user_id.is_(None))
+        )
+        result = await db.execute(find)
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            existing.prospect_count = prospect_count
+        else:
+            db.add(
+                FunnelDailySnapshot(
+                    snapshot_date=snapshot_date,
+                    stage=stage,
+                    channel=channel,
+                    owner_user_id=owner_user_id,
+                    prospect_count=prospect_count,
+                )
+            )
         await db.commit()
 
     @staticmethod
