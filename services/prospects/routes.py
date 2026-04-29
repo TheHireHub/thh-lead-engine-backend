@@ -309,16 +309,93 @@ async def touch_prospect(
 @router.post("/{prospect_id}/promote-to-thh")
 async def promote_to_thh(
     prospect_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales),
+    user: AdminUser = Depends(require_sales),
 ) -> dict:
-    """Phase 3 stub. Real implementation calls thh-backend §9.1."""
+    """
+    md §9.1 — promote a prospect to a real THH lead.
+
+    - Calls thh-backend's lead-create endpoint via
+      `services.integrations.thh_backend.promote_lead`.
+    - Sets `prospects.thh_user_id` from the response (Arch-15 manual button).
+    - Writes audit_log action=promote_to_thh.
+    - Idempotent at the route level: a second call when `thh_user_id` is
+      already set returns 409 (UI should disable the button after first call).
+    """
+    import httpx
+
+    from services.companies.crud import CompanyCRUD
+    from services.integrations import thh_backend
+
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="prospect not found")
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="TODO Phase 3 — promote-to-thh integration with thh-backend",
+    if prospect.thh_user_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": "prospect already promoted", "thh_user_id": prospect.thh_user_id},
+        )
+    if not prospect.email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="prospect has no email — cannot promote",
+        )
+
+    company_name = None
+    company_domain = None
+    if prospect.company_id:
+        company = await CompanyCRUD.get_by_id(db, prospect.company_id)
+        if company is not None:
+            company_name = company.name
+            company_domain = company.domain
+
+    try:
+        resp = await thh_backend.promote_lead(
+            email=prospect.email,
+            first_name=prospect.first_name or "",
+            last_name=prospect.last_name,
+            company_name=company_name,
+            domain=company_domain,
+            phone=prospect.phone,
+            source="lead_engine",
+            lead_engine_prospect_id=prospect.id,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"thh-backend promote failed: {exc}",
+        )
+
+    thh_user_id = resp.get("users.id") or resp.get("user_id") or resp.get("id")
+    if not thh_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="thh-backend did not return users.id",
+        )
+    try:
+        thh_user_id = int(thh_user_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="thh-backend returned invalid users.id",
+        )
+
+    prospect = await ProspectCRUD.set_thh_user_id(db, prospect, thh_user_id)
+
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect",
+        entity_id=prospect.id,
+        action="promote_to_thh",
+        after_json={"thh_user_id": thh_user_id},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return ok(
+        {**_serialize(prospect), "thh_user_id": thh_user_id},
+        message="promoted to THH",
     )
 
 

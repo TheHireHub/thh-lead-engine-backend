@@ -19,6 +19,8 @@ from services.landing_pages.crud import (
     LandingPageVariantCRUD,
     LandingPageVisitCRUD,
 )
+from services.prospects.crud import ProspectCRUD
+from services.prospects.dedupe import find_existing
 
 from .crud import SignupCRUD
 from .enums import SIGNUP_REQUEST_TYPES, get_label
@@ -67,7 +69,7 @@ async def create_signup(payload: SignupCreate, db: AsyncSession = Depends(get_db
     1. If visitor_id is provided, attach landing_page_id from the most recent
        visit (denormalised onto the signup for analytics).
     2. Insert signups row with otp_verified_at=NULL.
-    3. Call thh-backend POST /api/auth/login-otp/send (Phase 3 stub for now).
+    3. Call thh-backend POST /api/auth/login-otp/send (md §9.3).
     4. Audit row.
 
     NOTE: campaign_events.otp_sent (16) is deferred until otp-verify because
@@ -143,18 +145,16 @@ async def verify_otp(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Verify OTP and complete signup.
+    Verify OTP and complete signup. Per md §9.4 side effects:
 
-    On success:
     - Mark signup.otp_verified_at = now.
     - Attribute signup to landing_page_variant (bump signup_count).
-    - Upsert prospect via dedupe (TODO Dev A handoff:
-        services.prospects.dedupe.find_existing — Step 3.1).
-        Until then, signup.prospect_id stays NULL and campaign_events
-        (otp_sent / otp_verified) are deferred — campaign_events.prospect_id
-        is NOT NULL.
-    - Telegram alert (stub).
-    - Audit row.
+    - Upsert prospect via Arch-6 dedupe priority (linkedin > email > phone).
+      If new, create with email + name + phone from the signup row.
+    - Attach signup -> prospect, set prospects.registered_at (md §3 milestone).
+    - Write campaign_events otp_sent (16) + otp_verified (17) — deferred from
+      signup creation because campaign_events.prospect_id is NOT NULL.
+    - Telegram alert + audit row.
     """
     signup = await SignupCRUD.get_by_id(db, signup_id)
     if not signup:
@@ -187,17 +187,31 @@ async def verify_otp(
             if variant:
                 await LandingPageVariantCRUD.bump_signup(db, variant)
 
-    # TODO Dev A handoff (DEV_A_INSTRUCTIONS Step 3.1):
-    #   prospect = await find_existing(db, linkedin_url=None, email=signup.email, phone=signup.phone)
-    #   if not prospect:
-    #       prospect = await ProspectCRUD.create(db, email=signup.email, ...)
-    #   await SignupCRUD.attach_prospect(db, signup, prospect.id)
-    #   prospect.registered_at = now
+    # md Arch-6 dedupe priority + §9.4 upsert.
+    if not signup.prospect_id:
+        prospect = await find_existing(
+            db, email=signup.email, phone=signup.phone
+        )
+        if prospect is None:
+            first_name, last_name = (None, None)
+            if signup.name:
+                parts = signup.name.strip().split(" ", 1)
+                first_name = parts[0]
+                last_name = parts[1] if len(parts) > 1 else None
+            prospect = await ProspectCRUD.create(
+                db,
+                email=signup.email,
+                phone=signup.phone,
+                first_name=first_name,
+                last_name=last_name,
+            )
+        await SignupCRUD.attach_prospect(db, signup, prospect.id)
+        # md §3 — registered_at is the OTP-verified milestone.
+        await ProspectCRUD.set_registered(db, prospect)
 
-    # If prospect_id is already set (Dev A's helper landed and the signup
-    # row was attached during their flow), write the deferred events now.
+    # Write the deferred campaign_events (md §9.3 otp_sent=16, §9.4 otp_verified=17).
     if signup.prospect_id:
-        for ev_type in (16, 17):  # otp_sent, otp_verified
+        for ev_type in (16, 17):
             await CampaignEventCRUD.record(
                 db,
                 prospect_id=signup.prospect_id,

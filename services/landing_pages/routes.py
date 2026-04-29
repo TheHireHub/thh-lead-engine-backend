@@ -12,6 +12,7 @@ from services.admin_users.deps import require_growth, require_internal
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
+from services.prospects.promotion import promote_to_curious_on_visit
 
 from .crud import LandingPageCRUD, LandingPageVariantCRUD, LandingPageVisitCRUD
 from .hashing import hash_ip
@@ -233,9 +234,10 @@ async def record_visit(
         if variant:
             await LandingPageVariantCRUD.bump_visit(db, variant)
 
-    # TODO Dev A handoff (DEV_A_INSTRUCTIONS Step 3.6):
-    # if prospect_id and stage == cold, auto-promote to curious.
-    # Until they ship `services.prospects.promotion.promote_to_curious_on_visit`,
-    # we silently no-op so this endpoint stays usable.
+    # md Arch-37 / §3: any landing page visit promotes prospect cold→curious.
+    # `promote_to_curious_on_visit` is idempotent — no-ops if stage != cold.
+    promoted = False
+    if prospect_id is not None:
+        promoted = await promote_to_curious_on_visit(db, prospect_id)
 
-    return ok({"id": visit.id}, message="visit recorded")
+    return ok({"id": visit.id, "promoted_to_curious": promoted}, message="visit recorded")

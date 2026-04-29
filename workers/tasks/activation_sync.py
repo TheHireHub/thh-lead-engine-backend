@@ -9,9 +9,9 @@ thh-backend §9.5 to fetch:
 Update the prospect's milestone columns and fire a Telegram alert on
 first-time activation.
 
-Phase 2: thh_backend.get_activation_status returns a stub payload
-(success=True, all zeros). When Dev A's Phase 3 wraps the real httpx
-call, this worker's behaviour becomes meaningful — no code change here.
+`services.integrations.thh_backend.get_activation_status` is the real
+httpx call (md §9.5); failures are caught per-prospect so one bad call
+doesn't kill the worker.
 
 Schedule (in workers/settings.py): daily at 03:00 IST (after
 funnel_snapshot at 02:00).
