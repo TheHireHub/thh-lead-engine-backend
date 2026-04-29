@@ -1,10 +1,19 @@
-"""Async CRUD for campaigns + events."""
+"""
+Async CRUD for campaigns + campaign_prospects + campaign_events.
+
+Tables:
+- §7.6  campaigns
+- §7.7  campaign_prospects (junction)
+- §7.8  campaign_events
+"""
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Campaign, CampaignEvent, CampaignProspect
@@ -19,11 +28,20 @@ class CampaignCRUD:
         return result.scalar_one_or_none()
 
     @staticmethod
-    async def list_all(db: AsyncSession, status: Optional[int] = None) -> list[Campaign]:
+    async def list_all(
+        db: AsyncSession,
+        status: Optional[int] = None,
+        channel: Optional[int] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Campaign]:
         stmt = select(Campaign).where(Campaign.deleted_at.is_(None))
         if status is not None:
             stmt = stmt.where(Campaign.status == status)
-        result = await db.execute(stmt.order_by(Campaign.created_at.desc()))
+        if channel is not None:
+            stmt = stmt.where(Campaign.channel == channel)
+        stmt = stmt.order_by(Campaign.created_at.desc()).limit(limit).offset(offset)
+        result = await db.execute(stmt)
         return list(result.scalars().all())
 
     @staticmethod
@@ -33,6 +51,28 @@ class CampaignCRUD:
         await db.commit()
         await db.refresh(campaign)
         return campaign
+
+    @staticmethod
+    async def update(db: AsyncSession, campaign: Campaign, **fields) -> Campaign:
+        for key, value in fields.items():
+            if value is not None:
+                setattr(campaign, key, value)
+        await db.commit()
+        await db.refresh(campaign)
+        return campaign
+
+    @staticmethod
+    async def change_status(db: AsyncSession, campaign: Campaign, *, status: int) -> Campaign:
+        """Move through §6.5: 0 draft, 1 active, 2 paused, 3 completed, 4 archived."""
+        campaign.status = status
+        await db.commit()
+        await db.refresh(campaign)
+        return campaign
+
+    @staticmethod
+    async def soft_delete(db: AsyncSession, campaign: Campaign) -> None:
+        campaign.deleted_at = datetime.now(timezone.utc)
+        await db.commit()
 
 
 class CampaignEventCRUD:
@@ -45,19 +85,97 @@ class CampaignEventCRUD:
         return event
 
     @staticmethod
-    async def list_for_prospect(db: AsyncSession, prospect_id: int) -> list[CampaignEvent]:
+    async def list_for_prospect(
+        db: AsyncSession, prospect_id: int, limit: int = 200
+    ) -> list[CampaignEvent]:
         result = await db.execute(
             select(CampaignEvent)
             .where(CampaignEvent.prospect_id == prospect_id)
             .order_by(CampaignEvent.occurred_at.desc())
+            .limit(limit)
         )
         return list(result.scalars().all())
+
+    @staticmethod
+    async def list_for_campaign(
+        db: AsyncSession,
+        campaign_id: int,
+        event_type: Optional[int] = None,
+        limit: int = 500,
+    ) -> list[CampaignEvent]:
+        stmt = select(CampaignEvent).where(CampaignEvent.campaign_id == campaign_id)
+        if event_type is not None:
+            stmt = stmt.where(CampaignEvent.event_type == event_type)
+        stmt = stmt.order_by(CampaignEvent.occurred_at.desc()).limit(limit)
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def count_by_event_type(db: AsyncSession, campaign_id: int) -> dict[int, int]:
+        """For dashboards — open/click/reply rate calculation."""
+        result = await db.execute(
+            select(CampaignEvent.event_type, func.count(CampaignEvent.id))
+            .where(CampaignEvent.campaign_id == campaign_id)
+            .group_by(CampaignEvent.event_type)
+        )
+        return {int(et): int(n) for et, n in result.all()}
 
 
 class CampaignProspectCRUD:
     @staticmethod
-    async def add_prospects(db: AsyncSession, campaign_id: int, prospect_ids: list[int]) -> int:
+    async def add_prospects(
+        db: AsyncSession, campaign_id: int, prospect_ids: list[int]
+    ) -> tuple[int, int]:
+        """
+        Idempotent bulk add. Returns (added, skipped).
+
+        Skips prospect_ids already in this campaign (composite PK violation
+        is caught and ignored per row).
+        """
+        added = 0
+        skipped = 0
         for pid in prospect_ids:
-            db.add(CampaignProspect(campaign_id=campaign_id, prospect_id=pid))
+            row = CampaignProspect(campaign_id=campaign_id, prospect_id=pid)
+            db.add(row)
+            try:
+                await db.flush()
+                added += 1
+            except IntegrityError:
+                await db.rollback()
+                skipped += 1
         await db.commit()
-        return len(prospect_ids)
+        return added, skipped
+
+    @staticmethod
+    async def list_for_campaign(
+        db: AsyncSession,
+        campaign_id: int,
+        status: Optional[int] = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[CampaignProspect]:
+        stmt = select(CampaignProspect).where(CampaignProspect.campaign_id == campaign_id)
+        if status is not None:
+            stmt = stmt.where(CampaignProspect.status == status)
+        stmt = stmt.order_by(CampaignProspect.added_at.desc()).limit(limit).offset(offset)
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def set_status(
+        db: AsyncSession, *, campaign_id: int, prospect_id: int, status: int
+    ) -> Optional[CampaignProspect]:
+        """Update §6.6 status: queued/sent/skipped/failed/unsubscribed."""
+        result = await db.execute(
+            select(CampaignProspect).where(
+                CampaignProspect.campaign_id == campaign_id,
+                CampaignProspect.prospect_id == prospect_id,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        row.status = status
+        await db.commit()
+        await db.refresh(row)
+        return row
