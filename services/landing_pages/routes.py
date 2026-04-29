@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import require_growth, require_internal
+from services.admin_users.deps import require_dashboard_read, require_growth, require_internal
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -25,7 +26,9 @@ from .schemas import (
     VariantPerformance,
     VariantStatusUpdate,
     VisitCreate,
+    VisitsAggregateOut,
 )
+from .utm_mapping import OUTREACH, PAID, SEO, bucket_for
 from .variant_picker import pick_variant
 
 router = APIRouter(prefix="/api/landing-pages", tags=["landing_pages"])
@@ -191,6 +194,39 @@ async def variant_performance(
 
 
 # --------------------------------------------------------------- visits
+
+@router.get("/visits/aggregate")
+async def visits_aggregate(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_dashboard_read),
+) -> dict:
+    """
+    Visits aggregated by marketing-channel bucket (Funnel Board "Visits"
+    widget). Pulls every `landing_page_visits` row in
+    `[from_date, to_date]` inclusive, groups by `utm_source`, then folds
+    each source into one of `seo|paid|outreach` via
+    `services.landing_pages.utm_mapping.bucket_for`.
+    """
+    rows = await LandingPageVisitCRUD.aggregate_by_utm_source(
+        db, from_date=from_date, to_date=to_date
+    )
+    by_source: dict[str, int] = {SEO: 0, PAID: 0, OUTREACH: 0}
+    total = 0
+    for utm_source, count in rows:
+        by_source[bucket_for(utm_source)] += count
+        total += count
+
+    return ok(
+        VisitsAggregateOut(
+            from_date=from_date,
+            to_date=to_date,
+            total=total,
+            by_source=by_source,
+        ).model_dump(mode="json")
+    )
+
 
 @router.post("/visits", status_code=status.HTTP_201_CREATED)
 async def record_visit(

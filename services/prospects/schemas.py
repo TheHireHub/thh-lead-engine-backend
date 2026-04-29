@@ -50,6 +50,9 @@ class ProspectOut(BaseModel):
     owner_user_id: Optional[int]
     apollo_contact_id: Optional[str]
     thh_user_id: Optional[int]
+    first_touched_at: Optional[datetime]
+    last_touched_at: Optional[datetime]
+    touch_count: int
     registered_at: Optional[datetime]
     demo_booked_at: Optional[datetime]
     first_job_created_at: Optional[datetime]

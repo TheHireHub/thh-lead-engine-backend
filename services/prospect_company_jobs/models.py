@@ -62,6 +62,11 @@ class ProspectCompanyJob(Base):
     status: Mapped[int] = mapped_column(TINYINT(unsigned=True), nullable=False, default=0)
     candidates_prepared: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="denormalised count")
     jd_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    posting_url: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="outreach destination URL (where the prospect should land after CR/email click); separate from jd_url which is the job description doc",
+    )
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Job Distribution / At-Risk fields (Arch-40, 41)

@@ -137,6 +137,8 @@ async def create_user(
         first_name=payload.first_name,
         last_name=payload.last_name,
         role=payload.role,
+        daily_call_target=payload.daily_call_target,
+        avatar_color=payload.avatar_color,
     )
     await AuditLogCRUD.record(
         db,

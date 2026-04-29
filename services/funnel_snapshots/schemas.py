@@ -24,6 +24,28 @@ class SnapshotOut(BaseModel):
 SnapshotMode = Literal["daily", "weekly", "monthly"]
 
 
+class DailySeriesPoint(BaseModel):
+    """One `(date, value)` tuple in a per-series time series."""
+    date: date
+    value: int
+
+
+class DailySeriesOut(BaseModel):
+    """
+    Per-series daily time series for the Funnel Board (item 2 of the
+    BACKEND_CHANGES_PENDING audit).
+
+    `series` is the requested key (stage label, milestone label, or
+    "visits"). `points` is dense — every day in `[from_date, to_date]`
+    inclusive appears exactly once, with `value=0` if the underlying
+    query returned no rows for that day.
+    """
+    series: str
+    from_date: date
+    to_date: date
+    points: list[DailySeriesPoint]
+
+
 class AggregatedBucket(BaseModel):
     """A single bucket in a daily/weekly/monthly aggregation."""
     bucket_key: str  # e.g. '2026-04-01' (daily), '2026-W14' (weekly), '2026-04' (monthly)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -88,3 +88,18 @@ class RenderOut(BaseModel):
     content_json: dict = Field(
         description="The content to render — variant override or default_content_json fallback",
     )
+
+
+class VisitsAggregateOut(BaseModel):
+    """
+    Visits aggregate over a date range, bucketed by marketing channel
+    (Schema doc §3 Funnel KPI ownership; mapping in
+    services/landing_pages/utm_mapping.py).
+
+    `total` = all visits in the window.
+    `by_source` keys = {"seo", "paid", "outreach"}.
+    """
+    from_date: date
+    to_date: date
+    total: int
+    by_source: dict[str, int]

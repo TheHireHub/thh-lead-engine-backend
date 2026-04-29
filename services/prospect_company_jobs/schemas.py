@@ -23,6 +23,7 @@ class JobCreate(BaseModel):
     source_url: Optional[str] = None
     source_external_id: Optional[str] = None
     jd_url: Optional[str] = None
+    posting_url: Optional[str] = Field(default=None, max_length=500)
     notes: Optional[str] = None
 
 
@@ -33,6 +34,7 @@ class JobUpdate(BaseModel):
     confidentiality: Optional[int] = Field(default=None, ge=0, le=1)
     no_linkedin_post: Optional[int] = Field(default=None, ge=0, le=1)
     assigned_to_csm_user_id: Optional[int] = None
+    posting_url: Optional[str] = Field(default=None, max_length=500)
     notes: Optional[str] = None
 
 
@@ -61,6 +63,8 @@ class JobOut(BaseModel):
     target_met_at: Optional[datetime]
     total_applicants: int
     assigned_to_csm_user_id: Optional[int]
+    posting_url: Optional[str] = None
+    jd_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

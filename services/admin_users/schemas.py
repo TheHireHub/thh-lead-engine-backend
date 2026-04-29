@@ -14,12 +14,16 @@ class AdminUserCreate(BaseModel):
     first_name: str = Field(min_length=1, max_length=100)
     last_name: Optional[str] = Field(default=None, max_length=100)
     role: int = Field(ge=0, le=6, description="see ADMIN_ROLES §6.1")
+    daily_call_target: Optional[int] = Field(default=None, ge=0, le=255)
+    avatar_color: Optional[str] = Field(default=None, max_length=7, pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
 class AdminUserUpdate(BaseModel):
     first_name: Optional[str] = Field(default=None, max_length=100)
     last_name: Optional[str] = Field(default=None, max_length=100)
     role: Optional[int] = Field(default=None, ge=0, le=6)
+    daily_call_target: Optional[int] = Field(default=None, ge=0, le=255)
+    avatar_color: Optional[str] = Field(default=None, max_length=7, pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
 class AdminUserOut(BaseModel):
@@ -32,6 +36,8 @@ class AdminUserOut(BaseModel):
     role: int
     role_label: Optional[str] = None
     thh_user_id: Optional[int]
+    daily_call_target: int
+    avatar_color: Optional[str]
     last_login_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime

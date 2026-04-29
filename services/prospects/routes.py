@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +17,15 @@ from services.admin_users.deps import (
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
+from services.call_logs.crud import CallLogCRUD
+from services.call_logs.enums import CALL_OUTCOMES
+from services.call_logs.enums import get_label as get_outcome_label
 from services.common.envelope import ok
+from services.email_replies.enums import (
+    REPLY_CLASSIFICATIONS,
+    REPLY_CLASSIFIED_BY,
+)
+from services.email_replies.enums import get_label as get_reply_label
 
 from .crud import (
     ProspectCRUD,
@@ -36,12 +46,51 @@ from .schemas import (
 
 router = APIRouter(prefix="/api/prospects", tags=["prospects"])
 
+# A callback (outcome=2) within this window of `now` flips `is_urgent` true
+# — drives the red follow-up pill on the Prospects list (BACKEND_CHANGES_PENDING #9b).
+_URGENT_WINDOW = timedelta(minutes=60)
+
 
 def _serialize(p) -> dict:
     out = ProspectOut.model_validate(p).model_dump(mode="json")
     out["stage_label"] = get_label(FUNNEL_STAGES, p.stage)
     out["source_channel_label"] = get_label(CHANNELS, p.source_channel)
     return out
+
+
+def _attach_latest_call(out: dict, call_log) -> None:
+    """
+    Fold the most recent `call_logs` row into a serialized prospect dict
+    (in place). Sets `latest_call_*` keys + `is_urgent`. Always assigns
+    the keys (None / False when no call) so FE doesn't have to handle
+    presence/absence.
+    """
+    if call_log is None:
+        out["latest_call_outcome"] = None
+        out["latest_call_stage"] = None
+        out["latest_call_follow_up_time"] = None
+        out["latest_call_at"] = None
+        out["is_urgent"] = False
+        return
+
+    outcome_label = get_outcome_label(CALL_OUTCOMES, call_log.outcome)
+    follow_up = call_log.callback_at
+    out["latest_call_outcome"] = call_log.outcome
+    out["latest_call_stage"] = outcome_label
+    out["latest_call_follow_up_time"] = (
+        follow_up.isoformat() if follow_up is not None else None
+    )
+    out["latest_call_at"] = (
+        call_log.called_at.isoformat() if call_log.called_at else None
+    )
+
+    is_urgent = False
+    if call_log.outcome == 2 and follow_up is not None:  # call_back §6.26
+        # Treat an aware/naive callback timestamp uniformly.
+        target = follow_up if follow_up.tzinfo else follow_up.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        is_urgent = target <= now + _URGENT_WINDOW
+    out["is_urgent"] = is_urgent
 
 
 def _audit_payload(p) -> dict:
@@ -76,8 +125,19 @@ async def list_prospects(
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
+    """
+    List prospects. Each row is enriched with `latest_call_*` fields +
+    `is_urgent` from the most recent `call_logs` row (one batch query —
+    no N+1) so the FE Prospects list can render the call-stage chip
+    without a second round-trip. See BACKEND_CHANGES_PENDING.md item 9b.
+    """
     prospects = await ProspectCRUD.list_by_stage(db, stage=stage, limit=limit, offset=offset)
-    return ok([_serialize(p) for p in prospects])
+    rows = [_serialize(p) for p in prospects]
+    if prospects:
+        latest = await CallLogCRUD.latest_per_prospect(db, [p.id for p in prospects])
+        for row, prospect in zip(rows, prospects):
+            _attach_latest_call(row, latest.get(prospect.id))
+    return ok(rows)
 
 
 @router.get("/merge-review/pending")
@@ -172,10 +232,131 @@ async def get_prospect(
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
+    """Detail response carries the same `latest_call_*` enrichment as the list."""
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="prospect not found")
-    return ok(_serialize(prospect))
+    out = _serialize(prospect)
+    latest = await CallLogCRUD.latest_per_prospect(db, [prospect.id])
+    _attach_latest_call(out, latest.get(prospect.id))
+    return ok(out)
+
+
+@router.get("/{prospect_id}/timeline")
+async def get_timeline(
+    prospect_id: int,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_dashboard_read),
+) -> dict:
+    """
+    Unified activity timeline for one prospect (FE Prospect Detail
+    "Activity Timeline" tab). Merges, in a single descending feed:
+
+    - `audit_log` rows where `entity_type='prospect'` and `entity_id=<id>`
+    - `call_logs` rows where `prospect_id=<id>`
+    - `email_replies` rows where `prospect_id=<id>`
+    - `landing_page_visits` rows where `prospect_id=<id>`
+
+    Each item carries `{type, ts, ...}` — `type` ∈ {audit, call,
+    email_reply, visit}. `ts` is ISO-formatted UTC. `limit` caps the
+    merged result (200 default; older entries drop off the bottom).
+    """
+    from sqlalchemy import select
+
+    from services.audit.models import AuditLog
+    from services.call_logs.models import CallLog
+    from services.email_replies.models import EmailReply
+    from services.landing_pages.models import LandingPageVisit
+
+    prospect = await ProspectCRUD.get_by_id(db, prospect_id)
+    if not prospect:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="prospect not found")
+
+    items: list[dict] = []
+
+    # Audit
+    audit_stmt = (
+        select(AuditLog)
+        .where(AuditLog.entity_type == "prospect", AuditLog.entity_id == prospect_id)
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+    )
+    for row in (await db.execute(audit_stmt)).scalars().all():
+        items.append({
+            "type": "audit",
+            "id": row.id,
+            "ts": row.created_at.isoformat() if row.created_at else None,
+            "action": row.action,
+            "actor_user_id": row.actor_user_id,
+            "before_json": row.before_json,
+            "after_json": row.after_json,
+        })
+
+    # Call logs
+    call_stmt = (
+        select(CallLog)
+        .where(CallLog.prospect_id == prospect_id)
+        .order_by(CallLog.called_at.desc())
+        .limit(limit)
+    )
+    for row in (await db.execute(call_stmt)).scalars().all():
+        items.append({
+            "type": "call",
+            "id": row.id,
+            "ts": row.called_at.isoformat() if row.called_at else None,
+            "outcome": row.outcome,
+            "outcome_label": get_outcome_label(CALL_OUTCOMES, row.outcome),
+            "callback_at": row.callback_at.isoformat() if row.callback_at else None,
+            "notes": row.notes,
+            "caller_user_id": row.caller_user_id,
+        })
+
+    # Email replies
+    reply_stmt = (
+        select(EmailReply)
+        .where(EmailReply.prospect_id == prospect_id)
+        .order_by(EmailReply.received_at.desc())
+        .limit(limit)
+    )
+    for row in (await db.execute(reply_stmt)).scalars().all():
+        body = row.raw_body or ""
+        snippet = body if len(body) <= 200 else body[:200] + "…"
+        items.append({
+            "type": "email_reply",
+            "id": row.id,
+            "ts": row.received_at.isoformat() if row.received_at else None,
+            "subject": row.subject,
+            "snippet": snippet,
+            "classification": row.classification,
+            "classification_label": get_reply_label(REPLY_CLASSIFICATIONS, row.classification),
+            "classified_by": row.classified_by,
+            "classified_by_label": get_reply_label(REPLY_CLASSIFIED_BY, row.classified_by),
+            "campaign_id": row.campaign_id,
+        })
+
+    # Landing page visits
+    visit_stmt = (
+        select(LandingPageVisit)
+        .where(LandingPageVisit.prospect_id == prospect_id)
+        .order_by(LandingPageVisit.visited_at.desc())
+        .limit(limit)
+    )
+    for row in (await db.execute(visit_stmt)).scalars().all():
+        items.append({
+            "type": "visit",
+            "id": row.id,
+            "ts": row.visited_at.isoformat() if row.visited_at else None,
+            "landing_page_id": row.landing_page_id,
+            "utm_source": row.utm_source,
+            "utm_medium": row.utm_medium,
+            "utm_campaign": row.utm_campaign,
+            "referrer": row.referrer,
+        })
+
+    # Descending merge — None timestamps last.
+    items.sort(key=lambda i: (i["ts"] is None, i["ts"]), reverse=True)
+    return ok(items[:limit])
 
 
 @router.get("/{prospect_id}/stage-history")
