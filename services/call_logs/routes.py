@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
 
 from .crud import CallLogCRUD
 from .enums import CALL_OUTCOMES, get_label
-from .schemas import CallLogCreate, CallLogOut
+from .schemas import CallLogCreate, CallLogOut, NextProspectOut, SkipPayload
 
 router = APIRouter(prefix="/api/call-logs", tags=["call_logs"])
 
@@ -28,13 +29,66 @@ async def list_for_prospect(prospect_id: int, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/callbacks/{caller_user_id}")
-async def list_callbacks(caller_user_id: int, db: AsyncSession = Depends(get_db)) -> dict:
-    """Caller's pending callbacks sub-view (Schema doc §5.5)."""
-    rows = await CallLogCRUD.list_callbacks_for_caller(db, caller_user_id)
+async def list_callbacks(
+    caller_user_id: int,
+    upcoming_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Caller's pending callbacks (Schema doc §5.5). Use upcoming_only=true to hide past callbacks."""
+    rows = await CallLogCRUD.list_callbacks_for_caller(
+        db, caller_user_id, upcoming_only=upcoming_only
+    )
     return ok([_serialize(c) for c in rows])
+
+
+@router.get("/next-prospect")
+async def next_prospect(
+    caller_user_id: int = Query(..., description="TODO: derive from current_user once auth lands"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Picks the next prospect this caller should call (Schema doc §5.5).
+
+    Rules: owned by caller, not deleted, stage not in
+    (converted/lost/unsubscribed), no RNR in last 24h, oldest
+    last_touched_at first.
+    """
+    prospect = await CallLogCRUD.next_prospect_for_caller(db, caller_user_id)
+    if prospect is None:
+        return ok(None, message="no prospects in queue")
+    payload = NextProspectOut(
+        prospect_id=prospect.id,
+        name=" ".join(p for p in [prospect.first_name, prospect.last_name] if p) or None,
+        title=prospect.title,
+        company_id=prospect.company_id,
+        phone=prospect.phone,
+        email=prospect.email,
+        last_touched_at=prospect.last_touched_at,
+        rnr_count=prospect.rnr_count,
+    )
+    return ok(payload.model_dump())
+
+
+@router.post("/skip")
+async def skip_prospect(payload: SkipPayload, db: AsyncSession = Depends(get_db)) -> dict:
+    """Bump prospect.last_touched_at so the same prospect doesn't reappear next."""
+    await CallLogCRUD.skip_prospect(db, payload.prospect_id)
+    return ok({"prospect_id": payload.prospect_id}, message="skipped")
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def record_call(payload: CallLogCreate, db: AsyncSession = Depends(get_db)) -> dict:
     log = await CallLogCRUD.record(db, **payload.model_dump(exclude_none=True))
+    await AuditLogCRUD.record(
+        db,
+        entity_type="call_log",
+        entity_id=log.id,
+        action="record",
+        actor_user_id=log.caller_user_id,
+        after_json={
+            "prospect_id": log.prospect_id,
+            "outcome": log.outcome,
+            "outcome_label": get_label(CALL_OUTCOMES, log.outcome),
+        },
+    )
     return ok(_serialize(log), message="call recorded")
