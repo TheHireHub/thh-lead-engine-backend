@@ -15,6 +15,7 @@ class EmailReplyCreate(BaseModel):
     prospect_id: int
     raw_body: str
     subject: Optional[str] = Field(default=None, max_length=500)
+    from_address: Optional[str] = Field(default=None, max_length=255)
     classification: Optional[int] = Field(default=None, ge=0, le=1, description="see §6.8")
     classified_by: Optional[int] = Field(default=None, ge=0, le=2, description="see §6.9")
     classifier_confidence: Optional[float] = Field(default=None, ge=0, le=1)
@@ -33,6 +34,7 @@ class EmailReplyOut(BaseModel):
     prospect_id: int
     raw_body: str
     subject: Optional[str]
+    from_address: Optional[str] = None
     classification: int
     classification_label: Optional[str] = None
     classified_by: int
