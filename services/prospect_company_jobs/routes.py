@@ -238,7 +238,10 @@ async def create_job(payload: JobCreate, db: AsyncSession = Depends(get_db),
 
 @router.patch("/{job_id}")
 async def update_job(
-    job_id: int, payload: JobUpdate, db: AsyncSession = Depends(get_db)
+    job_id: int,
+    payload: JobUpdate,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     job = await JobCRUD.get_by_id(db, job_id)
     if not job:
@@ -271,7 +274,10 @@ async def update_job(
 
 @router.post("/{job_id}/distribute")
 async def distribute_job(
-    job_id: int, payload: JobDistributionRequest, db: AsyncSession = Depends(get_db)
+    job_id: int,
+    payload: JobDistributionRequest,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     """CSM "Post a Job" — Schema doc §5.6, Arch-40."""
     job = await JobCRUD.get_by_id(db, job_id)
@@ -354,7 +360,9 @@ async def mark_board_failed(
 
 @router.post("/boards/{board_row_id}/mark-removed")
 async def mark_board_removed(
-    board_row_id: int, db: AsyncSession = Depends(get_db)
+    board_row_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     row = await JobBoardCRUD.get_by_id(db, board_row_id)
     if not row:
@@ -467,7 +475,9 @@ async def update_candidate_status(
 
 @router.delete("/candidates/{candidate_id}")
 async def delete_candidate(
-    candidate_id: int, db: AsyncSession = Depends(get_db)
+    candidate_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     cand = await JobCandidateCRUD.get_by_id(db, candidate_id)
     if not cand:
