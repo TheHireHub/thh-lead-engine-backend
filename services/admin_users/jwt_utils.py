@@ -1,12 +1,10 @@
 """
-Auth helpers for admin_users (Schema doc Arch-23, §7.1, §6.1).
+JWT + cookie helpers for admin auth (Schema doc Arch-23).
 
-DB-agnostic per CLAUDE.md "Services / integrations" rules — these functions
-take primitives or framework objects and never touch `AsyncSession`.
+DB-agnostic per CLAUDE.md "Services / integrations" rules — no AsyncSession.
 
-Token transport: JWT in an httpOnly + Secure + SameSite=Lax cookie. Never
-localStorage. 2FA deferred (Ishank lock per Arch-23). Federated THH-JWT
-login is §9.6 v2.
+Token transport: JWT in an httpOnly + Secure + SameSite=Lax cookie named
+`lead_engine_session` (frontend `src/middleware.ts` checks for this name).
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ import bcrypt
 import jwt
 from fastapi import Response
 
-AUTH_COOKIE_NAME = "lead_engine_auth"
+AUTH_COOKIE_NAME = "lead_engine_session"
 _JWT_ALGORITHM = "HS256"
 
 
@@ -46,13 +44,14 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def encode_jwt(*, user_id: int, role: int) -> tuple[str, int]:
-    """Return (token, max_age_seconds)."""
+def create_access_token(*, user_id: int, role: int) -> tuple[str, int]:
+    """Returns (token, max_age_seconds)."""
     ttl = _jwt_ttl_hours()
     now = datetime.now(timezone.utc)
     exp = now + timedelta(hours=ttl)
     payload: dict[str, Any] = {
         "sub": str(user_id),
+        "user_id": user_id,
         "role": role,
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),
@@ -61,7 +60,7 @@ def encode_jwt(*, user_id: int, role: int) -> tuple[str, int]:
     return token, ttl * 3600
 
 
-def decode_jwt(token: str) -> dict[str, Any]:
+def decode_access_token(token: str) -> dict[str, Any]:
     """Raise jwt.InvalidTokenError subclasses on failure."""
     return jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
 

@@ -15,6 +15,20 @@ class CampaignCreate(BaseModel):
     audience_filter_json: Optional[dict] = None
 
 
+class CampaignUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    audience_filter_json: Optional[dict] = None
+
+
+class CampaignStatusChange(BaseModel):
+    status: int = Field(ge=0, le=4, description="see CAMPAIGN_STATUSES §6.5")
+
+
+class CampaignAddProspects(BaseModel):
+    prospect_ids: list[int] = Field(min_length=1)
+
+
 class CampaignOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -32,5 +46,5 @@ class CampaignOut(BaseModel):
 class CampaignEventCreate(BaseModel):
     campaign_id: Optional[int] = None
     prospect_id: int
-    event_type: int = Field(ge=0, le=17)
+    event_type: int = Field(ge=0, le=17, description="see CAMPAIGN_EVENT_TYPES §6.7")
     payload_json: Optional[dict] = None
