@@ -49,14 +49,20 @@ class AdminUserCRUD:
         first_name: str,
         last_name: Optional[str],
         role: int,
+        daily_call_target: Optional[int] = None,
+        avatar_color: Optional[str] = None,
     ) -> AdminUser:
-        user = AdminUser(
+        kwargs = dict(
             email=email,
             password_hash=password_hash,
             first_name=first_name,
             last_name=last_name,
             role=role,
+            avatar_color=avatar_color,
         )
+        if daily_call_target is not None:
+            kwargs["daily_call_target"] = daily_call_target
+        user = AdminUser(**kwargs)
         db.add(user)
         await db.commit()
         await db.refresh(user)

@@ -152,6 +152,63 @@ class FunnelSnapshotCRUD:
         return out
 
     @staticmethod
+    async def daily_stage_series(
+        db: AsyncSession, *, from_date: date, to_date: date, stage: int
+    ) -> dict[date, int]:
+        """
+        Per-day prospect_count for a single stage across [from_date,
+        to_date]. Sums all-channel (channel IS NULL) rollup rows so the
+        result is the daily total.
+        """
+        stmt = (
+            select(
+                FunnelDailySnapshot.snapshot_date,
+                func.sum(FunnelDailySnapshot.prospect_count),
+            )
+            .where(
+                FunnelDailySnapshot.snapshot_date >= from_date,
+                FunnelDailySnapshot.snapshot_date <= to_date,
+                FunnelDailySnapshot.stage == stage,
+                FunnelDailySnapshot.channel.is_(None),
+            )
+            .group_by(FunnelDailySnapshot.snapshot_date)
+        )
+        result = await db.execute(stmt)
+        return {row[0]: int(row[1] or 0) for row in result.all()}
+
+    @staticmethod
+    async def daily_milestone_series(
+        db: AsyncSession, *, from_date: date, to_date: date, milestone: str
+    ) -> dict[date, int]:
+        """
+        Per-day count of prospects whose `<milestone>_at` timestamp falls
+        on that calendar day. Cohort-style series — each prospect counts
+        once per milestone hit (Schema doc §3 — milestones are
+        independent timestamps).
+        """
+        col_map = {
+            "registered": Prospect.registered_at,
+            "demo_booked": Prospect.demo_booked_at,
+            "first_job_created": Prospect.first_job_created_at,
+            "first_applicant_received": Prospect.first_applicant_received_at,
+            "converted": Prospect.converted_at,
+        }
+        col = col_map[milestone]
+        bucket = func.date(col).label("bucket")
+        stmt = (
+            select(bucket, func.count(Prospect.id))
+            .where(
+                col.is_not(None),
+                func.date(col) >= from_date,
+                func.date(col) <= to_date,
+                Prospect.deleted_at.is_(None),
+            )
+            .group_by(bucket)
+        )
+        result = await db.execute(stmt)
+        return {row[0]: int(row[1] or 0) for row in result.all()}
+
+    @staticmethod
     async def stage_totals_in_range(
         db: AsyncSession, *, from_date: date, to_date: date
     ) -> dict[int, int]:

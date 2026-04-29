@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -51,3 +51,43 @@ class NextProspectOut(BaseModel):
     email: Optional[str]
     last_touched_at: Optional[datetime]
     rnr_count: int
+
+
+class DailyStatsOut(BaseModel):
+    """
+    Per-caller daily call statistics (powers the Sales Dashboard's KPI
+    strip + per-rep cards). `by_outcome` keys mirror CALL_OUTCOMES §6.26
+    labels exactly so FE doesn't need a second mapping table.
+    """
+    caller_user_id: int
+    date: date
+    calls_today: int
+    target: int = Field(description="caller's daily_call_target (admin_users column)")
+    in_queue: int = Field(description="prospects still eligible to call right now")
+    by_outcome: dict[str, int] = Field(
+        description=(
+            "{rnr, not_interested, call_back, follow_up, demo_scheduled} "
+            "per §6.26 — every key always present, missing outcomes report 0"
+        )
+    )
+
+
+class QueueRow(BaseModel):
+    """One row in the caller's eligible queue (prospect snapshot)."""
+    prospect_id: int
+    name: Optional[str]
+    title: Optional[str]
+    company_id: Optional[int]
+    phone: Optional[str]
+    email: Optional[str]
+    stage: int
+    stage_label: Optional[str] = None
+    last_touched_at: Optional[datetime]
+    rnr_count: int
+
+
+class QueueOut(BaseModel):
+    caller_user_id: int
+    date: date
+    total: int
+    rows: list[QueueRow]

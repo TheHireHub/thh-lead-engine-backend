@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import func, select
@@ -162,3 +162,24 @@ class LandingPageVisitCRUD:
             )
         )
         return result.scalar_one() or 0
+
+    @staticmethod
+    async def aggregate_by_utm_source(
+        db: AsyncSession, *, from_date: date, to_date: date
+    ) -> list[tuple[Optional[str], int]]:
+        """
+        Group visits in the [from_date, to_date] inclusive window by raw
+        utm_source. Returns `[(utm_source, count), ...]` — bucketing into
+        SEO/Paid/Outreach happens in the route via `utm_mapping.bucket_for`
+        so the mapping stays a route-level concern.
+        """
+        stmt = (
+            select(LandingPageVisit.utm_source, func.count(LandingPageVisit.id))
+            .where(
+                func.date(LandingPageVisit.visited_at) >= from_date,
+                func.date(LandingPageVisit.visited_at) <= to_date,
+            )
+            .group_by(LandingPageVisit.utm_source)
+        )
+        result = await db.execute(stmt)
+        return [(src, int(cnt or 0)) for src, cnt in result.all()]

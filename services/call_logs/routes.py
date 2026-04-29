@@ -2,22 +2,39 @@
 
 from __future__ import annotations
 
+from datetime import date as date_t
+from datetime import datetime, timezone
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.crud import AdminUserCRUD
 from services.admin_users.deps import (
     require_admin,
     require_caller,
+    require_dashboard_read,
     require_sales_or_csm,
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
+from services.prospects.enums import FUNNEL_STAGES
+from services.prospects.enums import get_label as get_funnel_label
+from services.prospects.models import Prospect
 
 from .crud import CallLogCRUD
 from .enums import CALL_OUTCOMES, get_label
-from .schemas import CallLogCreate, CallLogOut, NextProspectOut, SkipPayload
+from .schemas import (
+    CallLogCreate,
+    CallLogOut,
+    DailyStatsOut,
+    NextProspectOut,
+    QueueOut,
+    QueueRow,
+    SkipPayload,
+)
 
 router = APIRouter(prefix="/api/call-logs", tags=["call_logs"])
 
@@ -63,6 +80,122 @@ async def list_callbacks_for(
         db, caller_user_id, upcoming_only=upcoming_only
     )
     return ok([_serialize(c) for c in rows])
+
+
+# --- daily aggregates (Sales Dashboard / Prospects chips) -----------------
+
+# CALL_OUTCOMES §6.26 keys, in canonical order. Every response always reports
+# all five — missing outcomes are reported as 0 so the FE doesn't need a
+# fallback path.
+_OUTCOME_KEYS: list[str] = ["rnr", "not_interested", "call_back", "follow_up", "demo_scheduled"]
+
+
+def _stage_serialize(prospect: Prospect) -> dict:
+    name = " ".join(p for p in [prospect.first_name, prospect.last_name] if p) or None
+    return {
+        "prospect_id": prospect.id,
+        "name": name,
+        "title": prospect.title,
+        "company_id": prospect.company_id,
+        "phone": prospect.phone,
+        "email": prospect.email,
+        "stage": prospect.stage,
+        "stage_label": get_funnel_label(FUNNEL_STAGES, prospect.stage),
+        "last_touched_at": prospect.last_touched_at,
+        "rnr_count": prospect.rnr_count,
+    }
+
+
+@router.get("/daily-stats")
+async def daily_stats(
+    date: Optional[date_t] = None,
+    owner_user_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_dashboard_read),
+) -> dict:
+    """
+    Per-caller daily call counters (powers Sales Dashboard KPI strip +
+    Prospects-list call-stage chips).
+
+    Defaults: `date` → today (UTC); `owner_user_id` → current user. Only
+    admins may pass a different `owner_user_id` than their own — non-admin
+    callers can only inspect themselves (avoid cross-rep snooping).
+    """
+    if date is None:
+        date = datetime.now(timezone.utc).date()
+    target_user_id = owner_user_id if owner_user_id is not None else user.id
+
+    if target_user_id != user.id and user.role != 0:
+        raise HTTPException(status_code=403, detail="cannot view other users' stats")
+
+    target_user = await AdminUserCRUD.get_by_id(db, target_user_id)
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="caller not found")
+
+    calls_today = await CallLogCRUD.calls_today_count(
+        db, caller_user_id=target_user_id, day=date
+    )
+    outcomes_raw = await CallLogCRUD.outcomes_by_caller_on_date(
+        db, caller_user_id=target_user_id, day=date
+    )
+    by_outcome = {key: 0 for key in _OUTCOME_KEYS}
+    for outcome_int, count in outcomes_raw.items():
+        label = get_label(CALL_OUTCOMES, outcome_int)
+        if label in by_outcome:
+            by_outcome[label] = count
+
+    in_queue = await CallLogCRUD.queue_size_for_caller(
+        db, caller_user_id=target_user_id
+    )
+
+    payload = DailyStatsOut(
+        caller_user_id=target_user_id,
+        date=date,
+        calls_today=calls_today,
+        target=target_user.daily_call_target,
+        in_queue=in_queue,
+        by_outcome=by_outcome,
+    )
+    return ok(payload.model_dump(mode="json"))
+
+
+@router.get("/queue")
+async def call_queue(
+    owner_user_id: Optional[int] = None,
+    date: Optional[date_t] = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_dashboard_read),
+) -> dict:
+    """
+    Caller's eligible call queue (Schema doc §5.5 ordering — never-touched
+    first, then oldest-touched). Returns a prospect snapshot per row.
+
+    Defaults match `/daily-stats`: `date` → today (UTC, used only for the
+    response payload), `owner_user_id` → current user. Non-admins may only
+    request their own queue.
+    """
+    if date is None:
+        date = datetime.now(timezone.utc).date()
+    target_user_id = owner_user_id if owner_user_id is not None else user.id
+
+    if target_user_id != user.id and user.role != 0:
+        raise HTTPException(status_code=403, detail="cannot view other users' queue")
+
+    rows = await CallLogCRUD.queue_for_caller(
+        db, caller_user_id=target_user_id, limit=limit, offset=offset
+    )
+    total = await CallLogCRUD.queue_size_for_caller(
+        db, caller_user_id=target_user_id
+    )
+    payload = QueueOut(
+        caller_user_id=target_user_id,
+        date=date,
+        total=total,
+        rows=[QueueRow(**_stage_serialize(p)) for p in rows],
+    )
+    return ok(payload.model_dump(mode="json"))
 
 
 @router.get("/next-prospect")
