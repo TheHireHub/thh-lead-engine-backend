@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.deps import (
     require_admin,
+    require_dashboard_read,
     require_growth_or_bdr,
     require_internal,
     require_sales,
@@ -73,7 +74,7 @@ async def list_prospects(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     prospects = await ProspectCRUD.list_by_stage(db, stage=stage, limit=limit, offset=offset)
     return ok([_serialize(p) for p in prospects])
@@ -169,7 +170,7 @@ async def decide_merge(
 async def get_prospect(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
@@ -181,7 +182,7 @@ async def get_prospect(
 async def get_stage_history(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     rows = await ProspectCRUD.list_stage_history(db, prospect_id)
     return ok(

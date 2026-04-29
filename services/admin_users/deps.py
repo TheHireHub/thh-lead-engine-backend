@@ -117,3 +117,8 @@ require_internal = require_role(
 )
 """Anyone except Caller (RBAC-isolated) and Viewer — most read-mutate endpoints
 that the caller-role shouldn't see."""
+
+require_dashboard_read = require_role(
+    ROLE_ADMIN, ROLE_GROWTH, ROLE_BDR, ROLE_SALES, ROLE_CSM, ROLE_VIEWER
+)
+"""Everyone except Caller — read-only dashboards (board, finance, observers) per §4."""

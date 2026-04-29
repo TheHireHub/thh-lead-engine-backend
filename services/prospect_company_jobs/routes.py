@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import require_csm, require_sales_or_csm
+from services.admin_users.deps import require_csm, require_dashboard_read
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -89,7 +89,7 @@ async def list_jobs(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     """Combined filter for the CSM Board. All params optional."""
     rows = await JobCRUD.list_filtered(
@@ -111,7 +111,7 @@ async def grouped_by_company(
     status: Optional[int] = Query(default=None, ge=0, le=4),
     paid_status: Optional[int] = Query(default=None, ge=0, le=2),
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     """For the design's company-grouped CSM view (Schema doc §5.4 / §5.2)."""
     rows = await JobCRUD.list_filtered(
@@ -131,7 +131,7 @@ async def grouped_by_company(
 
 @router.get("/by-company/{company_id}")
 async def list_for_company(company_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     rows = await JobCRUD.list_for_company(db, company_id)
     return ok([_serialize_job(r) for r in rows])
@@ -140,7 +140,7 @@ async def list_for_company(company_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/at-risk")
 async def at_risk_jobs(
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     """Powers the Jobs at Risk CSM view (Schema doc §5.6, Arch-41)."""
     rows = await JobCRUD.list_at_risk(db)
@@ -149,7 +149,7 @@ async def at_risk_jobs(
 
 @router.get("/{job_id}")
 async def get_job(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     job = await JobCRUD.get_by_id(db, job_id)
     if not job:
@@ -162,7 +162,7 @@ async def job_history(
     job_id: int,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     """Field-change audit for tracked fields (status, paid_status, confidentiality, ...)."""
     job = await JobCRUD.get_by_id(db, job_id)
@@ -174,7 +174,7 @@ async def job_history(
 
 @router.get("/{job_id}/posting-helper")
 async def posting_helper(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     """
     Schema doc §5.7 (P3 PENDING).
@@ -309,7 +309,7 @@ async def distribute_job(
 
 @router.get("/{job_id}/boards")
 async def list_boards(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     rows = await JobBoardCRUD.list_for_job(db, job_id)
     return ok([_serialize_board(r) for r in rows])
@@ -417,7 +417,7 @@ async def record_applicants(
 
 @router.get("/{job_id}/candidates")
 async def list_candidates(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_sales_or_csm),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     rows = await JobCandidateCRUD.list_for_job(db, job_id)
     return ok([_serialize_candidate(r) for r in rows])

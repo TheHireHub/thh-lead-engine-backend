@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.deps import (
     require_admin,
+    require_dashboard_read,
     require_growth_or_bdr,
     require_internal,
 )
@@ -41,7 +42,7 @@ async def list_companies(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     companies = await CompanyCRUD.list_all(
         db,
@@ -59,7 +60,7 @@ async def list_companies(
 async def get_company(
     company_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
     company = await CompanyCRUD.get_by_id(db, company_id)
     if not company:
