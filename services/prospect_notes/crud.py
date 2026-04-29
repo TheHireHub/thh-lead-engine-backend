@@ -60,3 +60,29 @@ class ProspectNoteCRUD:
     async def soft_delete(db: AsyncSession, note: ProspectNote) -> None:
         note.deleted_at = datetime.now(timezone.utc)
         await db.commit()
+
+    @staticmethod
+    async def list_recent(
+        db: AsyncSession,
+        prospect_id: Optional[int] = None,
+        status: Optional[int] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ProspectNote]:
+        stmt = select(ProspectNote).where(ProspectNote.deleted_at.is_(None))
+        if prospect_id is not None:
+            stmt = stmt.where(ProspectNote.prospect_id == prospect_id)
+        if status is not None:
+            stmt = stmt.where(ProspectNote.status == status)
+        stmt = stmt.order_by(ProspectNote.created_at.desc()).limit(limit).offset(offset)
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def complete_task(db: AsyncSession, note: ProspectNote) -> ProspectNote:
+        """Flip task_open(1) -> task_done(2). No-op for plain notes (status=0)."""
+        if note.status == 1:
+            note.status = 2
+        await db.commit()
+        await db.refresh(note)
+        return note

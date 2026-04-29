@@ -1,35 +1,74 @@
 """
-HTTP wrapper for the four / five touch points with thh-backend (Schema doc §9).
+thh-backend HTTP client (Schema doc §9 — five touch points).
 
-Phase 2 STATUS: stubs. Phase 3 (Dev A's lane) brings real httpx calls.
-The function signatures below are the contract — Dev A should preserve them.
+DB-agnostic per CLAUDE.md "Integrations" rules.
 
-Touch points:
-  §9.1  promote_prospect        — POST thh-backend LeadCRUD.create_lead
-  §9.2  check_company_exists    — GET  thh-backend /api/.../check-company-exists
-  §9.3  send_otp                — POST thh-backend /api/auth/login-otp/send
-  §9.4  verify_otp              — POST thh-backend /api/auth/login-otp/verify
-  §9.5  get_activation_status   — GET  thh-backend /api/lead-engine/activation-status
+This is the ONLY module in lead-engine that talks to thh-backend. The five
+touch points (§9.1-§9.5) are exposed as small, named functions so callers
+do not duplicate URL strings or auth headers.
 
-Until real impl ships, callers can pass `--stub` semantics: stubs always
-"succeed" and return shape-compatible payloads so downstream code can run.
+Currently implemented:
+- §9.1 promote_lead       (called by promote-to-THH route)
+- §9.2 check_company_exists (called by Apollo sync worker)
+- §9.3 send_otp           (called by signups route)         [Dev B]
+- §9.4 verify_otp         (called by signups route)         [Dev B]
+- §9.5 get_activation_status (called by activation_sync worker) [Dev B]
+
+Each function fails closed: HTTPStatusError on non-2xx, RequestError on
+network failure. Callers decide whether to swallow or re-raise.
+
+Env:
+    THH_BACKEND_BASE_URL         — base URL (e.g. http://localhost:5000)
+    THH_BACKEND_SERVICE_TOKEN    — service-to-service bearer token
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------- §9.1 (Phase 3)
+def _base_url() -> str:
+    return os.getenv("THH_BACKEND_BASE_URL", "http://localhost:5000").rstrip("/")
 
-async def promote_prospect(
+
+def _headers() -> dict[str, str]:
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    token = os.getenv("THH_BACKEND_SERVICE_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+async def _post(path: str, *, json_body: dict[str, Any], timeout: float = 15.0) -> dict:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(_base_url() + path, json=json_body, headers=_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _get(path: str, *, params: Optional[dict] = None, timeout: float = 15.0) -> dict:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(_base_url() + path, params=params, headers=_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# §9.1 Promote prospect to THH
+# ---------------------------------------------------------------------------
+async def promote_lead(
     *,
     email: str,
-    first_name: Optional[str],
+    first_name: str,
     last_name: Optional[str],
     company_name: Optional[str],
     domain: Optional[str],
@@ -38,77 +77,66 @@ async def promote_prospect(
     lead_engine_prospect_id: int,
 ) -> dict:
     """
-    TODO Phase 3 (Dev A): real httpx POST to thh-backend's LeadCRUD.create_lead.
-    Returns `{thh_user_id: int}` on success.
+    Hit thh-backend's lead-create endpoint. Returns the response body —
+    expected shape `{users.id, ...}` per md §9.1.
+
+    Caller must persist `users.id` onto `prospects.thh_user_id`.
     """
-    logger.info("[STUB] promote_prospect(%s) — Phase 3 will replace this", email)
-    return {"thh_user_id": None, "_stub": True}
+    payload = {
+        "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
+        "company_name": company_name,
+        "domain": domain,
+        "phone": phone,
+        "source": source,
+        "lead_engine_prospect_id": lead_engine_prospect_id,
+    }
+    return await _post("/api/lead-engine/leads", json_body=payload)
 
 
-# --------------------------------------------------------------- §9.2 (Phase 3)
-
-async def check_company_exists(*, email: str, domain: Optional[str]) -> dict:
+# ---------------------------------------------------------------------------
+# §9.2 Pre-import dedupe check
+# ---------------------------------------------------------------------------
+async def check_company_exists(*, email: Optional[str] = None, domain: Optional[str] = None) -> dict:
     """
-    TODO Phase 3 (Dev A): real call to thh-backend `check-company-exists`.
-    Returns `{exists: bool, thh_user_id: int|None}`.
+    Returns `{exists: bool, thh_user_id?: int}` per md §9.2.
+
+    Side-effect rule: if `exists=true`, the caller annotates the prospect
+    (sets `prospects.thh_user_id`) but does NOT block the import.
     """
-    logger.info("[STUB] check_company_exists(%s, %s)", email, domain)
-    return {"exists": False, "thh_user_id": None, "_stub": True}
+    params: dict[str, Any] = {}
+    if email:
+        params["email"] = email
+    if domain:
+        params["domain"] = domain
+    return await _get("/api/lead-engine/check-company-exists", params=params)
 
 
-# --------------------------------------------------------------- §9.3 (Phase 3)
-
+# ---------------------------------------------------------------------------
+# §9.3 Send OTP                                                  [Dev B uses]
+# ---------------------------------------------------------------------------
 async def send_otp(*, email: str, purpose: str = "lead_engine_signup") -> dict:
-    """
-    TODO Phase 3 (Dev A): real call to thh-backend POST /api/auth/login-otp/send.
-    Returns `{success: bool, rate_limited: bool, retry_after: int|None}`.
-    """
-    logger.info("[STUB] send_otp(%s, %s)", email, purpose)
-    return {"success": True, "rate_limited": False, "retry_after": None, "_stub": True}
+    return await _post("/api/auth/login-otp/send", json_body={"email": email, "purpose": purpose})
 
 
-# --------------------------------------------------------------- §9.4 (Phase 3)
-
+# ---------------------------------------------------------------------------
+# §9.4 Verify OTP                                                [Dev B uses]
+# ---------------------------------------------------------------------------
 async def verify_otp(*, email: str, otp_code: str) -> dict:
-    """
-    TODO Phase 3 (Dev A): real call to thh-backend POST /api/auth/login-otp/verify.
-    Returns `{success: bool, reason: str|None}`.
-
-    Stub semantics: any 6-digit code passes; anything else fails. This lets
-    the signup flow be exercised end-to-end before Phase 3.
-    """
-    is_six_digits = otp_code.isdigit() and len(otp_code) == 6
-    if is_six_digits:
-        return {"success": True, "reason": None, "_stub": True}
-    return {"success": False, "reason": "invalid otp format", "_stub": True}
+    return await _post(
+        "/api/auth/login-otp/verify", json_body={"email": email, "otp_code": otp_code}
+    )
 
 
-# --------------------------------------------------------------- §9.5 (Phase 3)
-
+# ---------------------------------------------------------------------------
+# §9.5 Activation status                                         [Dev B uses]
+# ---------------------------------------------------------------------------
 async def get_activation_status(*, thh_user_id: int) -> dict:
     """
-    TODO Phase 3 (Dev A): real call to thh-backend
-    GET /api/lead-engine/activation-status?thh_user_id=X.
-
-    Returns:
-      {
-        has_jobs: bool, job_count: int,
-        has_applicants: bool, applicant_count: int,
-        first_job_at: datetime|None, first_applicant_at: datetime|None,
-      }
+    Returns `{has_jobs, job_count, has_applicants, applicant_count,
+    first_job_at, first_applicant_at}` per md §9.5.
     """
-    logger.info("[STUB] get_activation_status(thh_user_id=%s)", thh_user_id)
-    return {
-        "has_jobs": False,
-        "job_count": 0,
-        "has_applicants": False,
-        "applicant_count": 0,
-        "first_job_at": None,
-        "first_applicant_at": None,
-        "_stub": True,
-    }
-
-
-def thh_base_url() -> str:
-    """Read on call, not on import — env may change between requests in dev."""
-    return os.getenv("THH_BACKEND_BASE_URL", "http://localhost:5000")
+    return await _get(
+        "/api/lead-engine/activation-status", params={"thh_user_id": thh_user_id}
+    )

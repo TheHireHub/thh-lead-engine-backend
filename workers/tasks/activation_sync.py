@@ -82,10 +82,6 @@ async def activation_sync(ctx: dict) -> dict:
                 )
                 continue
 
-            if resp.get("_stub"):
-                # Phase 2 stub returns all zeros; nothing to update. Counted but no-op.
-                continue
-
             first_job_at = _to_dt(resp.get("first_job_at"))
             first_applicant_at = _to_dt(resp.get("first_applicant_at"))
             job_count = int(resp.get("job_count") or 0)

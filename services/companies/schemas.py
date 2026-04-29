@@ -45,3 +45,7 @@ class CompanyOut(BaseModel):
     enriched_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
+
+
+class CheckDomainRequest(BaseModel):
+    domain: str = Field(min_length=1, max_length=255)
