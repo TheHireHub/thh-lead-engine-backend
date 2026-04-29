@@ -1,74 +1,14 @@
-"""
-Async CRUD for email_replies (Schema doc §7.13, §6.8, §6.9, Arch-11).
-
-Rule-based binary classifier inlined here per "honor prateek" lock —
-keyword rules give ~70% accuracy free; LLM is v2 per §10 cuts.
-"""
+"""Async CRUD for email_replies (Schema doc §7.13, §6.8, §6.9, Arch-11)."""
 
 from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .classifier import BY_MANUAL, NEEDS_REVIEW_BELOW, classify_reply
 from .models import EmailReply
-
-
-# §6.8 classifications
-_POSITIVE = 0
-_NEGATIVE = 1
-
-# §6.9 classified_by
-_BY_RULE = 0
-_BY_LLM = 1
-_BY_MANUAL = 2
-
-# Keyword rules (Prateek line 1572): "Don't send me" / "I am interested".
-_NEGATIVE_KEYWORDS = (
-    "don't send",
-    "do not send",
-    "unsubscribe",
-    "remove me",
-    "stop sending",
-    "stop emailing",
-    "not interested",
-    "do not contact",
-    "leave me alone",
-    "take me off",
-)
-_POSITIVE_KEYWORDS = (
-    "interested",
-    "tell me more",
-    "schedule",
-    "book a",
-    "demo",
-    "let's talk",
-    "lets talk",
-    "sounds good",
-    "yes please",
-    "more info",
-    "happy to chat",
-)
-
-
-def classify_text(raw_body: str, subject: Optional[str] = None) -> tuple[int, float]:
-    """
-    Rule-based binary classifier (Arch-11). Returns (classification, confidence).
-
-    Priority: explicit negative keywords > positive keywords > default negative.
-    Conservative default: when in doubt, classify negative + low confidence so
-    a human reviewer (or LLM v2) can manually flip if needed.
-    """
-    haystack = ((subject or "") + " " + (raw_body or "")).lower()
-    for kw in _NEGATIVE_KEYWORDS:
-        if kw in haystack:
-            return _NEGATIVE, 1.0
-    for kw in _POSITIVE_KEYWORDS:
-        if kw in haystack:
-            return _POSITIVE, 1.0
-    # Default: negative low-confidence (operator can override).
-    return _NEGATIVE, 0.3
 
 
 class EmailReplyCRUD:
@@ -104,6 +44,29 @@ class EmailReplyCRUD:
         return list(result.scalars().all())
 
     @staticmethod
+    async def list_needs_review(
+        db: AsyncSession, limit: int = 100, offset: int = 0
+    ) -> list[EmailReply]:
+        """
+        Replies the rule classifier punted on (low confidence OR explicitly
+        flagged as `classified_by=manual` by the auto-fallback).
+        """
+        stmt = (
+            select(EmailReply)
+            .where(
+                and_(
+                    EmailReply.classified_by == BY_MANUAL,
+                    EmailReply.classifier_confidence < NEEDS_REVIEW_BELOW,
+                )
+            )
+            .order_by(EmailReply.received_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
     async def create(
         db: AsyncSession,
         *,
@@ -116,16 +79,19 @@ class EmailReplyCRUD:
         classifier_confidence: Optional[float] = None,
     ) -> EmailReply:
         """
-        Insert reply. If classification omitted, run rule classifier.
-
-        - explicit classification + classified_by NULL  -> classified_by=manual(2)
-        - omitted classification                        -> rule classifier, classified_by=rule(0)
+        Insert reply. If classification omitted, run rule classifier; if
+        confidence < 0.6, the classifier itself flags it as manual so the
+        needs-review queue catches it.
         """
         if classification is None:
-            classification, classifier_confidence = classify_text(raw_body, subject)
-            classified_by = _BY_RULE
+            result = classify_reply(raw_body, subject)
+            classification = result["classification"]
+            classified_by = result["classified_by"]
+            classifier_confidence = result["confidence"]
         elif classified_by is None:
-            classified_by = _BY_MANUAL
+            classified_by = BY_MANUAL
+            if classifier_confidence is None:
+                classifier_confidence = 1.0
 
         reply = EmailReply(
             campaign_id=campaign_id,
@@ -142,15 +108,12 @@ class EmailReplyCRUD:
         return reply
 
     @staticmethod
-    async def update_classification(
-        db: AsyncSession,
-        reply: EmailReply,
-        *,
-        classification: int,
+    async def reclassify(
+        db: AsyncSession, reply: EmailReply, *, classification: int
     ) -> EmailReply:
         """Manual override — sets classified_by=2 manual (§6.9)."""
         reply.classification = classification
-        reply.classified_by = _BY_MANUAL
+        reply.classified_by = BY_MANUAL
         reply.classifier_confidence = 1.0
         await db.commit()
         await db.refresh(reply)

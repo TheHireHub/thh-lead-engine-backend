@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.deps import current_user
+from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
 from services.prospects.crud import ProspectCRUD
@@ -31,10 +33,10 @@ router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
 # Event types (§6.7) that mutate prospect state.
 _EVENT_HEAT_KEY = {
-    2: "open",            # opened
-    3: "click",           # clicked
-    5: "positive_reply",  # replied_positive
-    12: "visit_no_signup",  # landing_visit
+    2: "open",
+    3: "click",
+    5: "positive_reply",
+    12: "visit_no_signup",
 }
 _EVENT_UNSUBSCRIBED = 7
 _EVENT_DEMO_BOOKED = 8
@@ -59,6 +61,7 @@ async def list_campaigns(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     rows = await CampaignCRUD.list_all(
         db, status=status, channel=channel, limit=limit, offset=offset
@@ -67,7 +70,11 @@ async def list_campaigns(
 
 
 @router.get("/{campaign_id}")
-async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+async def get_campaign(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     campaign = await CampaignCRUD.get_by_id(db, campaign_id)
     if not campaign:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="campaign not found")
@@ -78,17 +85,17 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)) -> 
 async def create_campaign(
     payload: CampaignCreate,
     request: Request,
-    actor_user_id: int,  # required: campaigns.created_by_user_id is NOT NULL (§7.6)
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     campaign = await CampaignCRUD.create(
         db,
         **payload.model_dump(exclude_none=True),
-        created_by_user_id=actor_user_id,
+        created_by_user_id=user.id,
     )
     await AuditLogCRUD.record(
         db,
-        actor_user_id=actor_user_id,
+        actor_user_id=user.id,
         entity_type="campaign",
         entity_id=campaign.id,
         action="create",
@@ -103,8 +110,8 @@ async def update_campaign(
     campaign_id: int,
     payload: CampaignUpdate,
     request: Request,
-    actor_user_id: int | None = None,
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     campaign = await CampaignCRUD.get_by_id(db, campaign_id)
     if not campaign:
@@ -113,7 +120,7 @@ async def update_campaign(
     campaign = await CampaignCRUD.update(db, campaign, **payload.model_dump(exclude_unset=True))
     await AuditLogCRUD.record(
         db,
-        actor_user_id=actor_user_id,
+        actor_user_id=user.id,
         entity_type="campaign",
         entity_id=campaign.id,
         action="update",
@@ -129,8 +136,8 @@ async def change_campaign_status(
     campaign_id: int,
     payload: CampaignStatusChange,
     request: Request,
-    actor_user_id: int | None = None,
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     campaign = await CampaignCRUD.get_by_id(db, campaign_id)
     if not campaign:
@@ -139,7 +146,7 @@ async def change_campaign_status(
     campaign = await CampaignCRUD.change_status(db, campaign, status=payload.status)
     await AuditLogCRUD.record(
         db,
-        actor_user_id=actor_user_id,
+        actor_user_id=user.id,
         entity_type="campaign",
         entity_id=campaign.id,
         action="status_change",
@@ -154,8 +161,8 @@ async def change_campaign_status(
 async def delete_campaign(
     campaign_id: int,
     request: Request,
-    actor_user_id: int | None = None,
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     campaign = await CampaignCRUD.get_by_id(db, campaign_id)
     if not campaign:
@@ -163,7 +170,7 @@ async def delete_campaign(
     await CampaignCRUD.soft_delete(db, campaign)
     await AuditLogCRUD.record(
         db,
-        actor_user_id=actor_user_id,
+        actor_user_id=user.id,
         entity_type="campaign",
         entity_id=campaign.id,
         action="delete",
@@ -177,6 +184,7 @@ async def add_prospects(
     campaign_id: int,
     payload: CampaignAddProspects,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     campaign = await CampaignCRUD.get_by_id(db, campaign_id)
     if not campaign:
@@ -194,21 +202,33 @@ async def list_campaign_prospects(
     limit: int = 500,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     rows = await CampaignProspectCRUD.list_for_campaign(
         db, campaign_id, status=status, limit=limit, offset=offset
     )
-    return ok(
-        [
+    out = []
+    for r in rows:
+        events = await CampaignEventCRUD.list_for_prospect(db, r.prospect_id, limit=1)
+        latest = events[0] if events else None
+        out.append(
             {
                 "campaign_id": r.campaign_id,
                 "prospect_id": r.prospect_id,
                 "status": r.status,
                 "added_at": r.added_at.isoformat() if r.added_at else None,
+                "latest_event": (
+                    {
+                        "event_type": latest.event_type,
+                        "event_type_label": get_label(CAMPAIGN_EVENT_TYPES, latest.event_type),
+                        "occurred_at": latest.occurred_at.isoformat() if latest.occurred_at else None,
+                    }
+                    if latest
+                    else None
+                ),
             }
-            for r in rows
-        ]
-    )
+        )
+    return ok(out)
 
 
 @router.get("/{campaign_id}/events")
@@ -217,8 +237,11 @@ async def list_campaign_events(
     event_type: int | None = None,
     limit: int = 500,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
-    rows = await CampaignEventCRUD.list_for_campaign(db, campaign_id, event_type=event_type, limit=limit)
+    rows = await CampaignEventCRUD.list_for_campaign(
+        db, campaign_id, event_type=event_type, limit=limit
+    )
     return ok(
         [
             {
@@ -235,8 +258,13 @@ async def list_campaign_events(
     )
 
 
-@router.get("/{campaign_id}/events/counts")
-async def campaign_event_counts(campaign_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+@router.get("/{campaign_id}/funnel")
+async def campaign_funnel(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
+    """Aggregate counts by event_type — feeds the campaign funnel viz."""
     counts = await CampaignEventCRUD.count_by_event_type(db, campaign_id)
     return ok(
         {
@@ -250,22 +278,14 @@ async def campaign_event_counts(campaign_id: int, db: AsyncSession = Depends(get
 async def record_event(
     payload: CampaignEventCreate,
     request: Request,
-    actor_user_id: int | None = None,
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     """
-    Record a campaign event. Side-effects on prospect state per §6.7 + Arch-21:
-
-    - opened (2)            -> heat +1
-    - clicked (3)           -> heat +2
-    - replied_positive (5)  -> heat +5
-    - landing_visit (12)    -> heat +3
-    - unsubscribed (7)      -> prospect.stage = 4 (unsubscribed)
-    - demo_booked (8)       -> prospect.demo_booked_at set if NULL
+    Record a campaign event. Side-effects on prospect state per §6.7 + Arch-21.
     """
     event = await CampaignEventCRUD.record(db, **payload.model_dump(exclude_none=True))
 
-    # Cross-service propagation (orchestration layer = routes, per CLAUDE.md).
     prospect = await ProspectCRUD.get_by_id(db, payload.prospect_id)
     if prospect is not None:
         heat_key = _EVENT_HEAT_KEY.get(payload.event_type)
@@ -279,7 +299,7 @@ async def record_event(
                 prospect,
                 to_stage=_STAGE_UNSUBSCRIBED,
                 reason="campaign_event:unsubscribed",
-                changed_by_user_id=actor_user_id,
+                changed_by_user_id=user.id,
             )
 
     return ok({"id": event.id}, message="event recorded")

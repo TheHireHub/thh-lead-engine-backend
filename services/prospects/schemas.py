@@ -65,3 +65,13 @@ class ProspectOut(BaseModel):
 class StageChange(BaseModel):
     to_stage: int = Field(ge=0, le=4)
     reason: Optional[str] = Field(default=None, max_length=255)
+
+
+class TouchRequest(BaseModel):
+    channel: int = Field(ge=0, le=12, description="see CHANNELS §6.3")
+
+
+class MergeDecision(BaseModel):
+    decision: str = Field(pattern="^(merged|rejected)$")
+    kept_prospect_id: Optional[int] = None
+    merged_prospect_id: Optional[int] = None

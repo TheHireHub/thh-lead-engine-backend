@@ -27,6 +27,7 @@ _PROVIDER_CALENDLY = 0
 _PROVIDER_APOLLO = 1
 # §6.7 campaign event types
 _EVENT_DEMO_BOOKED = 8
+_EVENT_DEMO_NO_SHOW = 10
 
 
 def _verify_calendly_signature(body: bytes, header: str | None) -> bool:
@@ -119,13 +120,14 @@ async def calendly_webhook(
     if is_duplicate:
         return ok({"duplicate": True, "id": delivery.id})
 
-    # 5. Process invitee.created -> set demo_booked_at + campaign_event(8).
+    # 5. Process invitee.created / invitee.canceled.
     try:
         invitee_email = (
             payload_obj.get("email")
             or (payload_obj.get("invitee") or {}).get("email")
         )
         kind = str(event_type or "").lower()
+
         if "invitee.created" in kind and invitee_email:
             prospect = await ProspectCRUD.get_by_email(db, invitee_email)
             if prospect is not None:
@@ -150,6 +152,40 @@ async def calendly_webhook(
                 logger.info(
                     "calendly: no prospect for email=%s — recording delivery only",
                     invitee_email,
+                )
+
+        elif "invitee.canceled" in kind and invitee_email:
+            prospect = await ProspectCRUD.get_by_email(db, invitee_email)
+            # Only fire demo_no_show if the booked time was in the past
+            # (i.e. they ghosted, not a pre-meeting cancel).
+            scheduled_at_raw = (
+                (payload_obj.get("scheduled_event") or {}).get("start_time")
+                or payload_obj.get("event_start_time")
+            )
+            scheduled_in_past = False
+            if scheduled_at_raw:
+                from datetime import datetime as _dt, timezone as _tz
+                try:
+                    sched = _dt.fromisoformat(str(scheduled_at_raw).replace("Z", "+00:00"))
+                    scheduled_in_past = sched <= _dt.now(_tz.utc)
+                except ValueError:
+                    scheduled_in_past = False
+            if prospect is not None and scheduled_in_past:
+                await CampaignEventCRUD.record(
+                    db,
+                    campaign_id=None,
+                    prospect_id=prospect.id,
+                    event_type=_EVENT_DEMO_NO_SHOW,
+                    payload_json={"calendly_event_uri": external_id},
+                )
+                await AuditLogCRUD.record(
+                    db,
+                    actor_user_id=None,
+                    entity_type="prospect",
+                    entity_id=prospect.id,
+                    action="calendly_demo_no_show",
+                    after_json={"calendly_event_uri": external_id},
+                    ip_address=request.client.host if request.client else None,
                 )
 
         # 6. mark processed

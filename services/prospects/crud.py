@@ -4,6 +4,8 @@ Async CRUD for the prospects domain.
 NOTE: stage transitions MUST go through `change_stage()` which writes both
 the prospects.stage column and a prospect_stage_history row in one
 transaction. Don't update prospects.stage directly elsewhere.
+
+Dedupe priority (Arch-6) lives in `services.prospects.dedupe.find_existing`.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from .models import (
 # Funnel stage ints (§6.2)
 _STAGE_CONVERTED = 2
 
-# Heat scoring rules (Schema doc Arch-21)
+# Heat scoring rules (Arch-21) — §6.7 event_type -> score
 _HEAT_EVENT_SCORES: dict[str, int] = {
     "open": 1,
     "click": 2,
@@ -56,8 +58,8 @@ class ProspectCRUD:
 
     @staticmethod
     async def get_by_linkedin(db: AsyncSession, linkedin_url: str) -> Optional[Prospect]:
-        # Note: NOT filtered by deleted_at. Soft-deleted rows still hold the
-        # unique constraint on linkedin_url, so dedupe must surface them.
+        # Note: NOT filtered by deleted_at — soft-deleted rows still hold the
+        # unique constraint, so dedupe must surface them.
         result = await db.execute(select(Prospect).where(Prospect.linkedin_url == linkedin_url))
         return result.scalar_one_or_none()
 
@@ -77,37 +79,10 @@ class ProspectCRUD:
 
     @staticmethod
     async def get_by_apollo_id(db: AsyncSession, apollo_contact_id: str) -> Optional[Prospect]:
-        result = await db.execute(select(Prospect).where(Prospect.apollo_contact_id == apollo_contact_id))
+        result = await db.execute(
+            select(Prospect).where(Prospect.apollo_contact_id == apollo_contact_id)
+        )
         return result.scalar_one_or_none()
-
-    @staticmethod
-    async def find_duplicate(
-        db: AsyncSession,
-        *,
-        linkedin_url: Optional[str] = None,
-        email: Optional[str] = None,
-        phone: Optional[str] = None,
-    ) -> Optional[Prospect]:
-        """
-        Arch-6 dedupe priority: LinkedIn URL > email > phone.
-
-        Returns the first existing prospect matched by the strongest
-        identifier supplied. Used by manual create + Apollo sync upsert +
-        OTP-verify upsert.
-        """
-        if linkedin_url:
-            existing = await ProspectCRUD.get_by_linkedin(db, linkedin_url)
-            if existing:
-                return existing
-        if email:
-            existing = await ProspectCRUD.get_by_email(db, email)
-            if existing:
-                return existing
-        if phone:
-            existing = await ProspectCRUD.get_by_phone(db, phone)
-            if existing:
-                return existing
-        return None
 
     @staticmethod
     async def list_by_stage(
@@ -118,6 +93,18 @@ class ProspectCRUD:
             stmt = stmt.where(Prospect.stage == stage)
         stmt = stmt.order_by(Prospect.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def list_stage_history(
+        db: AsyncSession, prospect_id: int, limit: int = 100
+    ) -> list[ProspectStageHistory]:
+        result = await db.execute(
+            select(ProspectStageHistory)
+            .where(ProspectStageHistory.prospect_id == prospect_id)
+            .order_by(ProspectStageHistory.changed_at.desc())
+            .limit(limit)
+        )
         return list(result.scalars().all())
 
     @staticmethod
@@ -151,13 +138,7 @@ class ProspectCRUD:
         reason: Optional[str] = None,
         changed_by_user_id: Optional[int] = None,
     ) -> Prospect:
-        """
-        Atomically: update prospect.stage AND insert prospect_stage_history row
-        AND write audit_log. Use this — never set prospect.stage directly.
-
-        Side-effects:
-        - On to_stage=converted (2): set converted_at if NULL (Arch-36 milestone).
-        """
+        """Atomic stage update + history row + audit row + converted_at milestone."""
         from_stage = prospect.stage
         prospect.stage = to_stage
         if to_stage == _STAGE_CONVERTED and prospect.converted_at is None:
@@ -184,8 +165,7 @@ class ProspectCRUD:
         )
         return prospect
 
-    # ---- Milestone setters (Schema doc §3) -----------------------------
-    # All idempotent: only set when currently NULL. Repeated calls are no-ops.
+    # ---- Milestone setters (Schema doc §3 — independent timestamps) -------
 
     @staticmethod
     async def set_registered(db: AsyncSession, prospect: Prospect) -> Prospect:
@@ -207,7 +187,6 @@ class ProspectCRUD:
     async def set_first_job_created(
         db: AsyncSession, prospect: Prospect, *, count: int
     ) -> Prospect:
-        """Called by activation_sync when first_job_at flips from NULL→non-NULL."""
         changed = False
         if prospect.first_job_created_at is None and count > 0:
             prospect.first_job_created_at = datetime.now(timezone.utc)
@@ -238,29 +217,31 @@ class ProspectCRUD:
 
     @staticmethod
     async def set_thh_user_id(db: AsyncSession, prospect: Prospect, thh_user_id: int) -> Prospect:
-        """Called by promote-to-THH after thh-backend §9.1 returns a users.id."""
         prospect.thh_user_id = thh_user_id
         await db.commit()
         await db.refresh(prospect)
         return prospect
 
-    # ---- Touch + heat (Arch-7, Arch-21) --------------------------------
+    @staticmethod
+    async def set_quality_score(db: AsyncSession, prospect: Prospect, score: int) -> Prospect:
+        prospect.quality_score = score
+        await db.commit()
+        await db.refresh(prospect)
+        return prospect
+
+    # ---- Touch + heat (Arch-7, Arch-21) -----------------------------------
 
     @staticmethod
     async def record_touch(
         db: AsyncSession, prospect: Prospect, *, channel: int
     ) -> Prospect:
-        """
-        Bump last_touched_at + touch_count on the prospect AND upsert the
-        per-channel junction row in `prospect_channels` (Arch-7).
-        """
+        """Bump prospects.last_touched_at + touch_count + upsert prospect_channels row."""
         now = datetime.now(timezone.utc)
         if prospect.first_touched_at is None:
             prospect.first_touched_at = now
         prospect.last_touched_at = now
         prospect.touch_count = (prospect.touch_count or 0) + 1
 
-        # upsert prospect_channels row
         result = await db.execute(
             select(ProspectChannel).where(
                 ProspectChannel.prospect_id == prospect.id,
@@ -281,10 +262,7 @@ class ProspectCRUD:
     async def apply_heat_event(
         db: AsyncSession, prospect: Prospect, *, event_type: str
     ) -> Prospect:
-        """
-        Increment heat_score per Arch-21 rule + re-bucket heat_level.
-        Unknown event_type = 0 score = no-op write but still re-buckets.
-        """
+        """Increment heat_score per Arch-21 rule + re-bucket heat_level."""
         delta = _HEAT_EVENT_SCORES.get(event_type, 0)
         if delta:
             prospect.heat_score = (prospect.heat_score or 0) + delta
@@ -317,7 +295,18 @@ class ProspectChannelCRUD:
 
 class ProspectMergeReviewCRUD:
     @staticmethod
-    async def list_pending(db: AsyncSession, limit: int = 50) -> list[ProspectMergeReviewQueue]:
+    async def get_by_id(
+        db: AsyncSession, queue_id: int
+    ) -> Optional[ProspectMergeReviewQueue]:
+        result = await db.execute(
+            select(ProspectMergeReviewQueue).where(ProspectMergeReviewQueue.id == queue_id)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def list_pending(
+        db: AsyncSession, limit: int = 50
+    ) -> list[ProspectMergeReviewQueue]:
         stmt = (
             select(ProspectMergeReviewQueue)
             .where(ProspectMergeReviewQueue.status == 0)

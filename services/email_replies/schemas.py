@@ -20,8 +20,8 @@ class EmailReplyCreate(BaseModel):
     classifier_confidence: Optional[float] = Field(default=None, ge=0, le=1)
 
 
-class EmailReplyClassificationUpdate(BaseModel):
-    """Manual override (classified_by=2 manual per §6.9)."""
+class EmailReplyReclassify(BaseModel):
+    """Manual override (sets classified_by=2 manual per §6.9)."""
 
     classification: int = Field(ge=0, le=1)
 

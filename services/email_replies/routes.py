@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.deps import current_user
+from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
 from services.common.envelope import ok
@@ -13,7 +15,7 @@ from services.prospects.crud import ProspectCRUD
 
 from .crud import EmailReplyCRUD
 from .enums import REPLY_CLASSIFICATIONS, REPLY_CLASSIFIED_BY, get_label
-from .schemas import EmailReplyClassificationUpdate, EmailReplyCreate, EmailReplyOut
+from .schemas import EmailReplyCreate, EmailReplyOut, EmailReplyReclassify
 
 router = APIRouter(prefix="/api/email-replies", tags=["email_replies"])
 
@@ -33,14 +35,8 @@ def _serialize(r) -> dict:
     return out
 
 
-async def _propagate_reply_side_effects(
-    db: AsyncSession, reply, *, actor_user_id: int | None
-) -> None:
-    """
-    Cross-service propagation per §6.7 + Arch-21:
-    - positive reply -> heat += 5 (positive_reply) + campaign_event(5)
-    - negative reply -> campaign_event(6) (no heat per Arch-21)
-    """
+async def _propagate_reply_side_effects(db: AsyncSession, reply) -> None:
+    """heat + campaign_event side-effects per §6.7 + Arch-21."""
     prospect = await ProspectCRUD.get_by_id(db, reply.prospect_id)
     if prospect is None:
         return
@@ -70,6 +66,7 @@ async def list_replies(
     limit: int = 200,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     rows = await EmailReplyCRUD.list_recent(
         db, classification=classification, limit=limit, offset=offset
@@ -77,14 +74,33 @@ async def list_replies(
     return ok([_serialize(r) for r in rows])
 
 
+@router.get("/needs-review")
+async def list_needs_review(
+    limit: int = 100,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
+    rows = await EmailReplyCRUD.list_needs_review(db, limit=limit, offset=offset)
+    return ok([_serialize(r) for r in rows])
+
+
 @router.get("/by-prospect/{prospect_id}")
-async def list_for_prospect(prospect_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+async def list_for_prospect(
+    prospect_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     rows = await EmailReplyCRUD.list_for_prospect(db, prospect_id)
     return ok([_serialize(r) for r in rows])
 
 
 @router.get("/{reply_id}")
-async def get_reply(reply_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+async def get_reply(
+    reply_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     reply = await EmailReplyCRUD.get_by_id(db, reply_id)
     if not reply:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="reply not found")
@@ -95,14 +111,14 @@ async def get_reply(reply_id: int, db: AsyncSession = Depends(get_db)) -> dict:
 async def record_reply(
     payload: EmailReplyCreate,
     request: Request,
-    actor_user_id: int | None = None,
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     reply = await EmailReplyCRUD.create(db, **payload.model_dump(exclude_unset=True))
-    await _propagate_reply_side_effects(db, reply, actor_user_id=actor_user_id)
+    await _propagate_reply_side_effects(db, reply)
     await AuditLogCRUD.record(
         db,
-        actor_user_id=actor_user_id,
+        actor_user_id=user.id,
         entity_type="email_reply",
         entity_id=reply.id,
         action="create",
@@ -116,31 +132,28 @@ async def record_reply(
     return ok(_serialize(reply), message="reply recorded")
 
 
-@router.patch("/{reply_id}/classification")
-async def override_classification(
+@router.post("/{reply_id}/reclassify")
+async def reclassify(
     reply_id: int,
-    payload: EmailReplyClassificationUpdate,
+    payload: EmailReplyReclassify,
     request: Request,
-    actor_user_id: int | None = None,
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     reply = await EmailReplyCRUD.get_by_id(db, reply_id)
     if not reply:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="reply not found")
     before = {"classification": reply.classification, "classified_by": reply.classified_by}
-    reply = await EmailReplyCRUD.update_classification(
-        db, reply, classification=payload.classification
-    )
-    # Propagate side effects again — flipping pos<->neg should fire heat/event correctly.
-    await _propagate_reply_side_effects(db, reply, actor_user_id=actor_user_id)
+    reply = await EmailReplyCRUD.reclassify(db, reply, classification=payload.classification)
+    await _propagate_reply_side_effects(db, reply)
     await AuditLogCRUD.record(
         db,
-        actor_user_id=actor_user_id,
+        actor_user_id=user.id,
         entity_type="email_reply",
         entity_id=reply.id,
-        action="classification_override",
+        action="reclassify",
         before_json=before,
         after_json={"classification": reply.classification, "classified_by": reply.classified_by},
         ip_address=request.client.host if request.client else None,
     )
-    return ok(_serialize(reply), message="classification updated")
+    return ok(_serialize(reply), message="reclassified")
