@@ -105,9 +105,17 @@ async def skip_prospect(
 async def record_call(
     payload: CallLogCreate,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_caller),
+    user: AdminUser = Depends(require_caller),
 ) -> dict:
-    log = await CallLogCRUD.record(db, **payload.model_dump(exclude_none=True))
+    """
+    Caller records a call against a prospect. `caller_user_id` is taken
+    from the authenticated user — clients cannot spoof another caller.
+    """
+    log = await CallLogCRUD.record(
+        db,
+        **payload.model_dump(exclude_none=True),
+        caller_user_id=user.id,
+    )
     await AuditLogCRUD.record(
         db,
         entity_type="call_log",

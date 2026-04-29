@@ -9,8 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CallLogCreate(BaseModel):
+    """Inbound call-log payload. caller_user_id is set by the route from
+    the authenticated user (not accepted from the client) — see §5.5."""
+
     prospect_id: int
-    caller_user_id: int
     outcome: int = Field(ge=0, le=4, description="see CALL_OUTCOMES §6.26")
     callback_at: Optional[datetime] = None
     notes: Optional[str] = None
