@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.deps import current_user, require_role
+from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
 
@@ -23,18 +25,36 @@ def _serialize(c) -> dict:
 
 
 @router.get("/by-prospect/{prospect_id}")
-async def list_for_prospect(prospect_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+async def list_for_prospect(
+    prospect_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     rows = await CallLogCRUD.list_for_prospect(db, prospect_id)
     return ok([_serialize(c) for c in rows])
 
 
+@router.get("/callbacks")
+async def list_my_callbacks(
+    upcoming_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
+) -> dict:
+    """Caller's own pending callbacks (Schema doc §5.5)."""
+    rows = await CallLogCRUD.list_callbacks_for_caller(
+        db, user.id, upcoming_only=upcoming_only
+    )
+    return ok([_serialize(c) for c in rows])
+
+
 @router.get("/callbacks/{caller_user_id}")
-async def list_callbacks(
+async def list_callbacks_for(
     caller_user_id: int,
     upcoming_only: bool = False,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_role(0)),
 ) -> dict:
-    """Caller's pending callbacks (Schema doc §5.5). Use upcoming_only=true to hide past callbacks."""
+    """Admin-only — view another caller's callbacks."""
     rows = await CallLogCRUD.list_callbacks_for_caller(
         db, caller_user_id, upcoming_only=upcoming_only
     )
@@ -43,17 +63,14 @@ async def list_callbacks(
 
 @router.get("/next-prospect")
 async def next_prospect(
-    caller_user_id: int = Query(..., description="TODO: derive from current_user once auth lands"),
     db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     """
     Picks the next prospect this caller should call (Schema doc §5.5).
-
-    Rules: owned by caller, not deleted, stage not in
-    (converted/lost/unsubscribed), no RNR in last 24h, oldest
-    last_touched_at first.
+    Caller is the authenticated user.
     """
-    prospect = await CallLogCRUD.next_prospect_for_caller(db, caller_user_id)
+    prospect = await CallLogCRUD.next_prospect_for_caller(db, user.id)
     if prospect is None:
         return ok(None, message="no prospects in queue")
     payload = NextProspectOut(
@@ -70,14 +87,22 @@ async def next_prospect(
 
 
 @router.post("/skip")
-async def skip_prospect(payload: SkipPayload, db: AsyncSession = Depends(get_db)) -> dict:
+async def skip_prospect(
+    payload: SkipPayload,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     """Bump prospect.last_touched_at so the same prospect doesn't reappear next."""
     await CallLogCRUD.skip_prospect(db, payload.prospect_id)
     return ok({"prospect_id": payload.prospect_id}, message="skipped")
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
-async def record_call(payload: CallLogCreate, db: AsyncSession = Depends(get_db)) -> dict:
+async def record_call(
+    payload: CallLogCreate,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     log = await CallLogCRUD.record(db, **payload.model_dump(exclude_none=True))
     await AuditLogCRUD.record(
         db,

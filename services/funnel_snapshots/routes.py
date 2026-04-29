@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.deps import current_user
+from services.admin_users.models import AdminUser
 from services.common.envelope import ok
 
 from .crud import FunnelSnapshotCRUD
@@ -52,6 +54,7 @@ async def list_snapshots(
     channel: Optional[int] = None,
     mode: SnapshotMode = "daily",
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     """
     Daily snapshots, optionally aggregated to weekly/monthly buckets.
@@ -89,7 +92,10 @@ async def list_snapshots(
 
 
 @router.get("/today")
-async def today(db: AsyncSession = Depends(get_db)) -> dict:
+async def today(
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     """
     Live current-day stage counts (read directly from `prospects`, not
     snapshots — snapshots are at most a day behind). Powers the
@@ -109,6 +115,7 @@ async def conversion_rates(
     from_date: date = Query(...),
     to_date: date = Query(...),
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     """
     Coarse-grained funnel KPIs over a date range (Schema doc §3 KPI table).

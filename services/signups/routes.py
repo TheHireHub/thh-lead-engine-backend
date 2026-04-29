@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.deps import current_user
+from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
 from services.common.envelope import ok
@@ -44,6 +46,7 @@ async def list_signups(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     rows = await SignupCRUD.list_filtered(
         db,

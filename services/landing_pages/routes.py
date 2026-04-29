@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.deps import current_user
+from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
 
@@ -38,6 +40,7 @@ async def list_pages(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     pages = await LandingPageCRUD.list_all(
         db,
@@ -51,7 +54,11 @@ async def list_pages(
 
 
 @router.get("/by-slug/{slug}")
-async def get_by_slug(slug: str, db: AsyncSession = Depends(get_db)) -> dict:
+async def get_by_slug(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     page = await LandingPageCRUD.get_by_slug(db, slug)
     if not page:
         raise HTTPException(status_code=404, detail="landing page not found")
@@ -89,7 +96,11 @@ async def render_by_slug(
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
-async def create_page(payload: LandingPageCreate, db: AsyncSession = Depends(get_db)) -> dict:
+async def create_page(
+    payload: LandingPageCreate,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     if await LandingPageCRUD.get_by_slug(db, payload.slug):
         raise HTTPException(status_code=409, detail="slug already in use")
     page = await LandingPageCRUD.create(db, **payload.model_dump(exclude_none=True))
@@ -106,7 +117,11 @@ async def create_page(payload: LandingPageCreate, db: AsyncSession = Depends(get
 # --------------------------------------------------------------- variants
 
 @router.post("/variants", status_code=status.HTTP_201_CREATED)
-async def create_variant(payload: VariantCreate, db: AsyncSession = Depends(get_db)) -> dict:
+async def create_variant(
+    payload: VariantCreate,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     page = await LandingPageCRUD.get_by_id(db, payload.landing_page_id)
     if not page:
         raise HTTPException(status_code=404, detail="landing page not found")
@@ -130,6 +145,7 @@ async def update_variant_status(
     variant_id: int,
     payload: VariantStatusUpdate,
     db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
 ) -> dict:
     variant = await LandingPageVariantCRUD.get_by_id(db, variant_id)
     if not variant:
@@ -148,7 +164,11 @@ async def update_variant_status(
 
 
 @router.get("/{page_id}/variants/performance")
-async def variant_performance(page_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+async def variant_performance(
+    page_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(current_user),
+) -> dict:
     """Per-variant analytics: visit_count, signup_count, computed signup_rate."""
     page = await LandingPageCRUD.get_by_id(db, page_id)
     if not page:
