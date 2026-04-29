@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import current_user
+from services.admin_users.deps import (
+    require_admin,
+    require_growth_or_bdr,
+    require_internal,
+)
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -37,7 +41,7 @@ async def list_companies(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     companies = await CompanyCRUD.list_all(
         db,
@@ -55,7 +59,7 @@ async def list_companies(
 async def get_company(
     company_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     company = await CompanyCRUD.get_by_id(db, company_id)
     if not company:
@@ -67,7 +71,7 @@ async def get_company(
 async def check_domain(
     payload: CheckDomainRequest,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Used by signup flow + Apollo sync — `{exists: bool, company_id: int|null}`."""
     company = await CompanyCRUD.get_by_domain(db, payload.domain)
@@ -79,7 +83,7 @@ async def create_company(
     payload: CompanyCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     if payload.domain and await CompanyCRUD.get_by_domain(db, payload.domain):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="company with this domain exists")
@@ -102,7 +106,7 @@ async def update_company(
     payload: CompanyUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     company = await CompanyCRUD.get_by_id(db, company_id)
     if not company:
@@ -127,7 +131,7 @@ async def enrich_company(
     company_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     """
     Stub — real enrichment (Apollo / Clearbit) lives in a future
@@ -154,7 +158,7 @@ async def delete_company(
     company_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_admin),
 ) -> dict:
     company = await CompanyCRUD.get_by_id(db, company_id)
     if not company:

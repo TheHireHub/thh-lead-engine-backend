@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import current_user, require_role
+from services.admin_users.deps import (
+    require_admin,
+    require_caller,
+    require_sales_or_csm,
+)
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -28,7 +32,7 @@ def _serialize(c) -> dict:
 async def list_for_prospect(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     rows = await CallLogCRUD.list_for_prospect(db, prospect_id)
     return ok([_serialize(c) for c in rows])
@@ -38,7 +42,7 @@ async def list_for_prospect(
 async def list_my_callbacks(
     upcoming_only: bool = False,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_caller),
 ) -> dict:
     """Caller's own pending callbacks (Schema doc §5.5)."""
     rows = await CallLogCRUD.list_callbacks_for_caller(
@@ -52,7 +56,7 @@ async def list_callbacks_for(
     caller_user_id: int,
     upcoming_only: bool = False,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_role(0)),
+    _user: AdminUser = Depends(require_admin),
 ) -> dict:
     """Admin-only — view another caller's callbacks."""
     rows = await CallLogCRUD.list_callbacks_for_caller(
@@ -64,7 +68,7 @@ async def list_callbacks_for(
 @router.get("/next-prospect")
 async def next_prospect(
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_caller),
 ) -> dict:
     """
     Picks the next prospect this caller should call (Schema doc §5.5).
@@ -90,7 +94,7 @@ async def next_prospect(
 async def skip_prospect(
     payload: SkipPayload,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_caller),
 ) -> dict:
     """Bump prospect.last_touched_at so the same prospect doesn't reappear next."""
     await CallLogCRUD.skip_prospect(db, payload.prospect_id)
@@ -101,7 +105,7 @@ async def skip_prospect(
 async def record_call(
     payload: CallLogCreate,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_caller),
 ) -> dict:
     log = await CallLogCRUD.record(db, **payload.model_dump(exclude_none=True))
     await AuditLogCRUD.record(

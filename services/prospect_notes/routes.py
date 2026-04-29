@@ -6,7 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import current_user, require_role
+from services.admin_users.deps import (
+    require_admin,
+    require_internal,
+)
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -31,7 +34,7 @@ async def list_notes(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await ProspectNoteCRUD.list_recent(
         db, prospect_id=prospect_id, status=status, limit=limit, offset=offset
@@ -43,7 +46,7 @@ async def list_notes(
 async def list_for_prospect(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await ProspectNoteCRUD.list_for_prospect(db, prospect_id)
     return ok([_serialize(n) for n in rows])
@@ -52,7 +55,7 @@ async def list_for_prospect(
 @router.get("/tasks/open")
 async def list_my_open_tasks(
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Open tasks assigned to the calling user."""
     rows = await ProspectNoteCRUD.list_open_tasks_for_user(db, user.id)
@@ -63,7 +66,7 @@ async def list_my_open_tasks(
 async def list_open_tasks_for(
     user_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_role(0)),
+    _user: AdminUser = Depends(require_admin),
 ) -> dict:
     """Admin-only — open tasks assigned to any user."""
     rows = await ProspectNoteCRUD.list_open_tasks_for_user(db, user_id)
@@ -75,7 +78,7 @@ async def create_note(
     payload: NoteCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_internal),
 ) -> dict:
     note = await ProspectNoteCRUD.create(
         db, **payload.model_dump(exclude_none=True), created_by_user_id=user.id
@@ -98,7 +101,7 @@ async def update_note(
     payload: NoteUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_internal),
 ) -> dict:
     note = await ProspectNoteCRUD.get_by_id(db, note_id)
     if not note:
@@ -123,7 +126,7 @@ async def complete_task(
     note_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Flip status 1 (task_open) -> 2 (task_done). No-op if already done."""
     note = await ProspectNoteCRUD.get_by_id(db, note_id)
@@ -146,7 +149,7 @@ async def delete_note(
     note_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_admin),
 ) -> dict:
     note = await ProspectNoteCRUD.get_by_id(db, note_id)
     if not note:

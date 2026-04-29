@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import current_user
+from services.admin_users.deps import (
+    require_admin,
+    require_growth_or_bdr,
+    require_internal,
+    require_sales,
+)
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -68,7 +73,7 @@ async def list_prospects(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     prospects = await ProspectCRUD.list_by_stage(db, stage=stage, limit=limit, offset=offset)
     return ok([_serialize(p) for p in prospects])
@@ -77,7 +82,7 @@ async def list_prospects(
 @router.get("/merge-review/pending")
 async def list_pending_merges(
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await ProspectMergeReviewCRUD.list_pending(db)
     return ok(
@@ -100,7 +105,7 @@ async def decide_merge(
     payload: MergeDecision,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_admin),
 ) -> dict:
     """
     Resolve a row in `prospect_merge_review_queue`.
@@ -164,7 +169,7 @@ async def decide_merge(
 async def get_prospect(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
@@ -176,7 +181,7 @@ async def get_prospect(
 async def get_stage_history(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await ProspectCRUD.list_stage_history(db, prospect_id)
     return ok(
@@ -201,7 +206,7 @@ async def create_prospect(
     payload: ProspectCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     # Arch-6 dedupe priority: LinkedIn URL > email > phone.
     duplicate = await find_existing(
@@ -239,7 +244,7 @@ async def update_prospect(
     payload: ProspectUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
@@ -271,7 +276,7 @@ async def change_stage(
     payload: StageChange,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
@@ -291,7 +296,7 @@ async def touch_prospect(
     prospect_id: int,
     payload: TouchRequest,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
@@ -304,7 +309,7 @@ async def touch_prospect(
 async def promote_to_thh(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales),
 ) -> dict:
     """Phase 3 stub. Real implementation calls thh-backend §9.1."""
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
@@ -321,7 +326,7 @@ async def delete_prospect(
     prospect_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_admin),
 ) -> dict:
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:

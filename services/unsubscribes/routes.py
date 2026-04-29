@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import current_user
+from services.admin_users.deps import require_internal
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
@@ -136,7 +136,7 @@ async def list_unsubscribes(
     limit: int = 200,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await UnsubscribeCRUD.list_recent(
         db, source_campaign_id=source_campaign_id, limit=limit, offset=offset
@@ -148,6 +148,6 @@ async def list_unsubscribes(
 async def check(
     email: str,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     return ok({"unsubscribed": await UnsubscribeCRUD.is_unsubscribed(db, email)})

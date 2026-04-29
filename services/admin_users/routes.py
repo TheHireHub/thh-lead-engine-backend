@@ -17,7 +17,7 @@ from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
 
 from .crud import AdminUserCRUD
-from .deps import current_user, require_role
+from .deps import current_user, require_admin
 from .enums import ADMIN_ROLES, get_label
 from .jwt_utils import (
     clear_auth_cookie,
@@ -102,7 +102,7 @@ async def me(user: AdminUser = Depends(current_user)) -> dict:
 async def list_users(
     role: int | None = None,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_role(0)),
+    _: AdminUser = Depends(require_admin),
 ) -> dict:
     users = await AdminUserCRUD.list_all(db, role=role)
     return ok([_serialize(u) for u in users])
@@ -112,7 +112,7 @@ async def list_users(
 async def get_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_role(0)),
+    _: AdminUser = Depends(require_admin),
 ) -> dict:
     user = await AdminUserCRUD.get_by_id(db, user_id)
     if not user:
@@ -125,7 +125,7 @@ async def create_user(
     payload: AdminUserCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    actor: AdminUser = Depends(require_role(0)),
+    actor: AdminUser = Depends(require_admin),
 ) -> dict:
     if await AdminUserCRUD.get_by_email(db, payload.email):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already in use")
@@ -156,7 +156,7 @@ async def update_user(
     payload: AdminUserUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    actor: AdminUser = Depends(require_role(0)),
+    actor: AdminUser = Depends(require_admin),
 ) -> dict:
     user = await AdminUserCRUD.get_by_id(db, user_id)
     if not user:
@@ -181,7 +181,7 @@ async def delete_user(
     user_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    actor: AdminUser = Depends(require_role(0)),
+    actor: AdminUser = Depends(require_admin),
 ) -> dict:
     user = await AdminUserCRUD.get_by_id(db, user_id)
     if not user:

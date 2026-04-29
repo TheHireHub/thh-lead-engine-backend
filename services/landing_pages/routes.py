@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import current_user
+from services.admin_users.deps import require_growth, require_internal
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -40,7 +40,7 @@ async def list_pages(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     pages = await LandingPageCRUD.list_all(
         db,
@@ -57,7 +57,7 @@ async def list_pages(
 async def get_by_slug(
     slug: str,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     page = await LandingPageCRUD.get_by_slug(db, slug)
     if not page:
@@ -99,7 +99,7 @@ async def render_by_slug(
 async def create_page(
     payload: LandingPageCreate,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_growth),
 ) -> dict:
     if await LandingPageCRUD.get_by_slug(db, payload.slug):
         raise HTTPException(status_code=409, detail="slug already in use")
@@ -120,7 +120,7 @@ async def create_page(
 async def create_variant(
     payload: VariantCreate,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_growth),
 ) -> dict:
     page = await LandingPageCRUD.get_by_id(db, payload.landing_page_id)
     if not page:
@@ -145,7 +145,7 @@ async def update_variant_status(
     variant_id: int,
     payload: VariantStatusUpdate,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_growth),
 ) -> dict:
     variant = await LandingPageVariantCRUD.get_by_id(db, variant_id)
     if not variant:
@@ -167,7 +167,7 @@ async def update_variant_status(
 async def variant_performance(
     page_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Per-variant analytics: visit_count, signup_count, computed signup_rate."""
     page = await LandingPageCRUD.get_by_id(db, page_id)

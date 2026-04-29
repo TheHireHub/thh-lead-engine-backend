@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import current_user
+from services.admin_users.deps import require_csm, require_sales_or_csm
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -89,7 +89,7 @@ async def list_jobs(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     """Combined filter for the CSM Board. All params optional."""
     rows = await JobCRUD.list_filtered(
@@ -111,7 +111,7 @@ async def grouped_by_company(
     status: Optional[int] = Query(default=None, ge=0, le=4),
     paid_status: Optional[int] = Query(default=None, ge=0, le=2),
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     """For the design's company-grouped CSM view (Schema doc §5.4 / §5.2)."""
     rows = await JobCRUD.list_filtered(
@@ -131,7 +131,7 @@ async def grouped_by_company(
 
 @router.get("/by-company/{company_id}")
 async def list_for_company(company_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     rows = await JobCRUD.list_for_company(db, company_id)
     return ok([_serialize_job(r) for r in rows])
@@ -140,7 +140,7 @@ async def list_for_company(company_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/at-risk")
 async def at_risk_jobs(
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     """Powers the Jobs at Risk CSM view (Schema doc §5.6, Arch-41)."""
     rows = await JobCRUD.list_at_risk(db)
@@ -149,7 +149,7 @@ async def at_risk_jobs(
 
 @router.get("/{job_id}")
 async def get_job(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     job = await JobCRUD.get_by_id(db, job_id)
     if not job:
@@ -162,7 +162,7 @@ async def job_history(
     job_id: int,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     """Field-change audit for tracked fields (status, paid_status, confidentiality, ...)."""
     job = await JobCRUD.get_by_id(db, job_id)
@@ -174,7 +174,7 @@ async def job_history(
 
 @router.get("/{job_id}/posting-helper")
 async def posting_helper(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     """
     Schema doc §5.7 (P3 PENDING).
@@ -223,7 +223,7 @@ async def posting_helper(job_id: int, db: AsyncSession = Depends(get_db),
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_job(payload: JobCreate, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     job = await JobCRUD.create(db, **payload.model_dump(exclude_none=True))
     await AuditLogCRUD.record(
@@ -241,7 +241,7 @@ async def update_job(
     job_id: int,
     payload: JobUpdate,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     job = await JobCRUD.get_by_id(db, job_id)
     if not job:
@@ -277,7 +277,7 @@ async def distribute_job(
     job_id: int,
     payload: JobDistributionRequest,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     """CSM "Post a Job" — Schema doc §5.6, Arch-40."""
     job = await JobCRUD.get_by_id(db, job_id)
@@ -309,7 +309,7 @@ async def distribute_job(
 
 @router.get("/{job_id}/boards")
 async def list_boards(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     rows = await JobBoardCRUD.list_for_job(db, job_id)
     return ok([_serialize_board(r) for r in rows])
@@ -320,7 +320,7 @@ async def mark_board_posted(
     board_row_id: int,
     payload: BoardMarkPostedPayload,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     row = await JobBoardCRUD.get_by_id(db, board_row_id)
     if not row:
@@ -341,7 +341,7 @@ async def mark_board_failed(
     board_row_id: int,
     payload: BoardMarkFailedPayload,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     row = await JobBoardCRUD.get_by_id(db, board_row_id)
     if not row:
@@ -362,7 +362,7 @@ async def mark_board_failed(
 async def mark_board_removed(
     board_row_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     row = await JobBoardCRUD.get_by_id(db, board_row_id)
     if not row:
@@ -384,7 +384,7 @@ async def record_applicants(
     job_id: int,
     payload: ApplicantCountPayload,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     """
     Set the per-board applicant count and recompute total_applicants.
@@ -417,7 +417,7 @@ async def record_applicants(
 
 @router.get("/{job_id}/candidates")
 async def list_candidates(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_sales_or_csm),
 ) -> dict:
     rows = await JobCandidateCRUD.list_for_job(db, job_id)
     return ok([_serialize_candidate(r) for r in rows])
@@ -427,7 +427,7 @@ async def list_candidates(job_id: int, db: AsyncSession = Depends(get_db),
 async def create_candidate_match(
     payload: CandidateMatchCreate,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(require_csm),
 ) -> dict:
     row = await JobCandidateCRUD.create(
         db,
@@ -453,7 +453,7 @@ async def update_candidate_status(
     candidate_id: int,
     payload: CandidateStatusUpdate,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     cand = await JobCandidateCRUD.get_by_id(db, candidate_id)
     if not cand:
@@ -477,7 +477,7 @@ async def update_candidate_status(
 async def delete_candidate(
     candidate_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(current_user),
+    _user: AdminUser = Depends(require_csm),
 ) -> dict:
     cand = await JobCandidateCRUD.get_by_id(db, candidate_id)
     if not cand:
