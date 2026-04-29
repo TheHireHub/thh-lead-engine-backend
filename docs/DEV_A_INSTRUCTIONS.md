@@ -279,18 +279,82 @@ Dev B's Activation Sync worker is touch point 5 — they'll import your client.
 
 ---
 
-## 6. Workflow rules
+## 6. Branching model and workflow
 
-1. Branch per service: `feat/dev-a/prospects-dedupe`, `feat/dev-a/calendly-webhook`, etc.
-2. Before push: `git fetch origin && git rebase origin/main`. If a rebase conflict appears in `app.py`, `setup_database.py`, or `services/common/enums.py` — **stop and ping Dev B** before resolving.
-3. Squash-merge to `main`.
-4. PR title format: `feat(prospects): dedupe chain on insert` / `fix(campaigns): null channel handling` / `chore(deps): add httpx`.
-5. Run smoke test before opening PR:
+### The four branches
+
+```
+main      ← production / stable. Only Phase milestones land here.
+  ↑
+dev       ← integration branch. Both devs' work converges here.
+  ↑   ↑
+dev-a   dev-b
+```
+
+- **`main`** — touch only when Phase 2 / 3 hits a milestone. Reviewed merges from `dev` only.
+- **`dev`** — every PR you open targets this branch. Once both devs' work on `dev` is stable + smoke-tested, someone (whoever's free) opens a PR `dev → main`.
+- **`dev-a`** — your working branch. You commit here freely.
+- **`dev-b`** — Dev B's working branch. **You never touch it.**
+
+### Daily flow
+
+1. **Start your day**:
    ```bash
-   .venv/Scripts/python.exe -c "import app; print(len(app.app.routes), 'routes')"
+   git checkout dev-a
+   git fetch origin
+   git rebase origin/dev          # pull in any of Dev B's merged work
    ```
-   Should not error and should print 59+ as you add routes.
-6. Every CRUD method that mutates state should write to `audit_log` — Dev B's `AuditLogCRUD.record` is your friend.
+2. **Work** — commit to `dev-a` directly, or use sub-feature branches off `dev-a` if a single piece of work is large enough to want its own PR-style review:
+   ```bash
+   git checkout -b feat/prospects-dedupe dev-a
+   # ... work ...
+   git checkout dev-a
+   git merge --no-ff feat/prospects-dedupe
+   git branch -d feat/prospects-dedupe
+   ```
+3. **Push to remote**:
+   ```bash
+   git push origin dev-a
+   ```
+4. **Open a PR `dev-a → dev`** when a chunk is ready for integration. Every chunk should be independently reviewable — don't sit on 3 weeks of work.
+5. **After your PR merges into `dev`**, both you and Dev B should rebase your branches:
+   ```bash
+   git checkout dev-a
+   git fetch origin
+   git rebase origin/dev
+   git push --force-with-lease origin dev-a
+   ```
+   `--force-with-lease` is safe; never use plain `--force`.
+
+### Conflict prevention
+
+- **If a rebase conflict appears in `app.py`, `setup_database.py`, or `services/common/enums.py`** — stop, ping Dev B, resolve together. These are the only files where you might collide.
+- **If a conflict appears anywhere else**, it means you accidentally edited Dev B's territory. Revert your change and re-do it in your lane.
+- Don't merge `dev-b` into `dev-a` directly. Both branches only flow through `dev`.
+
+### PR title + commit message format
+
+- `feat(prospects): dedupe chain on insert`
+- `fix(campaigns): null channel handling`
+- `chore(deps): add httpx`
+- `docs(prospects): document stage history endpoint`
+
+### Pre-PR checklist
+
+```bash
+# 1. Smoke test — app imports cleanly
+.venv/Scripts/python.exe -c "import app; print(len(app.app.routes), 'routes')"
+
+# 2. Migrations apply cleanly (if you added/changed models)
+alembic upgrade head
+
+# 3. setup_database.py still works on a fresh DB
+python setup_database.py --drop
+```
+
+### Audit row reminder
+
+Every CRUD method that mutates state should write to `audit_log` — Dev B owns the audit service but you call `AuditLogCRUD.record(...)` from your CRUD methods. Never skip it; it's the SOC2 trail.
 
 ---
 

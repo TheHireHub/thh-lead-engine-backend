@@ -269,18 +269,82 @@ Phase 3 lives mostly in Dev A's lane (auth + prospects + thh-backend client). Yo
 
 ---
 
-## 6. Workflow rules
+## 6. Branching model and workflow
 
-1. Branch per service: `feat/dev-b/landing-variant-picker`, `feat/dev-b/csm-jobs-distribute`, etc.
-2. Before push: `git fetch origin && git rebase origin/main`. If a rebase conflict appears in `app.py`, `setup_database.py`, or `services/common/enums.py` — **stop and ping Dev A** before resolving.
-3. Squash-merge to `main`.
-4. PR title format: `feat(landing_pages): variant picker` / `fix(call_logs): callback_at validation` / `chore(deps): add httpx`.
-5. Run smoke test before opening PR:
+### The four branches
+
+```
+main      ← production / stable. Only Phase milestones land here.
+  ↑
+dev       ← integration branch. Both devs' work converges here.
+  ↑   ↑
+dev-a   dev-b
+```
+
+- **`main`** — touch only when Phase 2 / 3 hits a milestone. Reviewed merges from `dev` only.
+- **`dev`** — every PR you open targets this branch. Once both devs' work on `dev` is stable + smoke-tested, someone (whoever's free) opens a PR `dev → main`.
+- **`dev-b`** — your working branch. You commit here freely.
+- **`dev-a`** — Dev A's working branch. **You never touch it.**
+
+### Daily flow
+
+1. **Start your day**:
    ```bash
-   .venv/Scripts/python.exe -c "import app; print(len(app.app.routes), 'routes')"
+   git checkout dev-b
+   git fetch origin
+   git rebase origin/dev          # pull in any of Dev A's merged work
    ```
-   Should not error and should print 59+ as you add routes.
-6. Every CRUD method that mutates state should write to `audit_log` — your own service, eat your own dog food.
+2. **Work** — commit to `dev-b` directly, or use sub-feature branches off `dev-b` if a single piece of work is large enough to want its own PR-style review:
+   ```bash
+   git checkout -b feat/landing-variant-picker dev-b
+   # ... work ...
+   git checkout dev-b
+   git merge --no-ff feat/landing-variant-picker
+   git branch -d feat/landing-variant-picker
+   ```
+3. **Push to remote**:
+   ```bash
+   git push origin dev-b
+   ```
+4. **Open a PR `dev-b → dev`** when a chunk is ready for integration. Every chunk should be independently reviewable — don't sit on 3 weeks of work.
+5. **After your PR merges into `dev`**, both you and Dev A should rebase your branches:
+   ```bash
+   git checkout dev-b
+   git fetch origin
+   git rebase origin/dev
+   git push --force-with-lease origin dev-b
+   ```
+   `--force-with-lease` is safe; never use plain `--force`.
+
+### Conflict prevention
+
+- **If a rebase conflict appears in `app.py`, `setup_database.py`, or `services/common/enums.py`** — stop, ping Dev A, resolve together. These are the only files where you might collide.
+- **If a conflict appears anywhere else**, it means you accidentally edited Dev A's territory. Revert your change and re-do it in your lane.
+- Don't merge `dev-a` into `dev-b` directly. Both branches only flow through `dev`.
+
+### PR title + commit message format
+
+- `feat(landing_pages): variant picker`
+- `fix(call_logs): callback_at validation`
+- `chore(deps): add httpx`
+- `docs(jobs): document distribute workflow`
+
+### Pre-PR checklist
+
+```bash
+# 1. Smoke test — app imports cleanly
+.venv/Scripts/python.exe -c "import app; print(len(app.app.routes), 'routes')"
+
+# 2. Migrations apply cleanly (if you added/changed models)
+alembic upgrade head
+
+# 3. setup_database.py still works on a fresh DB
+python setup_database.py --drop
+```
+
+### Audit row reminder
+
+Every CRUD method that mutates state should write to `audit_log` — you own the audit service, so eat your own dog food. Call `AuditLogCRUD.record(...)` from every mutation in every service of yours.
 
 ---
 
