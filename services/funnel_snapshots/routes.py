@@ -128,6 +128,8 @@ async def conversion_rates(
     cold = stage_totals.get(0, 0)
     curious = stage_totals.get(1, 0)
     converted = stage_totals.get(2, 0)
+    demo_booked = milestones["demo_booked"]
+    first_job_created = milestones["first_job_created"]
 
     payload = ConversionRatesOut(
         from_date=from_date,
@@ -137,8 +139,16 @@ async def conversion_rates(
         converted=converted,
         cold_to_curious_pct=(curious / cold * 100.0) if cold else 0.0,
         curious_to_converted_pct=(converted / curious * 100.0) if curious else 0.0,
-        demo_booked=milestones["demo_booked"],
-        first_job_created=milestones["first_job_created"],
+        # Schema doc §3: Curious → Trial (= first_job_created milestone)
+        curious_to_first_job_pct=(
+            (first_job_created / curious * 100.0) if curious else 0.0
+        ),
+        # Schema doc §3: Demo Booked → Converted (Sales-owned)
+        demo_to_converted_pct=(
+            (converted / demo_booked * 100.0) if demo_booked else 0.0
+        ),
+        demo_booked=demo_booked,
+        first_job_created=first_job_created,
         first_applicant_received=milestones["first_applicant_received"],
         registered=milestones["registered"],
     )

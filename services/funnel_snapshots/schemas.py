@@ -41,7 +41,20 @@ class TodayCountsOut(BaseModel):
 
 
 class ConversionRatesOut(BaseModel):
-    """Coarse-grained funnel KPIs over a date range (Schema doc §3)."""
+    """
+    Coarse-grained funnel KPIs over a date range (Schema doc §3).
+
+    The three Phase-2 percentages — Cold→Curious, Curious→Trial(via
+    first_job_created), Demo→Converted — match the KPI ownership table in
+    Schema doc §3:
+      Growth owns Cold→Curious
+      Product/CSM owns Curious→Trial first_job
+      Sales owns Demo→Converted
+
+    Note: stage_totals_in_range sums per-day prospect_count (a smoothed
+    "presence over the period") while milestone_counts is unique
+    prospects. The percentages are directional, not strict cohort rates.
+    """
     from_date: date
     to_date: date
     cold: int
@@ -49,7 +62,11 @@ class ConversionRatesOut(BaseModel):
     converted: int
     cold_to_curious_pct: float
     curious_to_converted_pct: float
-    # Milestone-based rates (don't fit a single linear funnel — see §3)
+    # Per Schema doc §3 KPI ownership: Curious → Trial via first_job_created
+    curious_to_first_job_pct: float
+    # Per Schema doc §3: Demo Booked → Converted (Sales-owned)
+    demo_to_converted_pct: float
+    # Milestone counts (independent timestamps fire in any order — §3)
     demo_booked: int
     first_job_created: int
     first_applicant_received: int
