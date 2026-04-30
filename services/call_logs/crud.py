@@ -44,12 +44,20 @@ class CallLogCRUD:
         return list(result.scalars().all())
 
     @staticmethod
-    async def list_callbacks_for_caller(
-        db: AsyncSession, caller_user_id: int, *, upcoming_only: bool = False
+    async def list_calls_by_outcome_for_caller(
+        db: AsyncSession,
+        caller_user_id: int,
+        outcome: int,
+        *,
+        upcoming_only: bool = False,
     ) -> list[CallLog]:
+        """Generic helper — returns this caller's calls for a given outcome,
+        with `callback_at` set, ordered ascending. Used for both the
+        Callbacks panel (outcome=2) and the Demos panel (outcome=4) on the
+        Sales Dashboard."""
         stmt = select(CallLog).where(
             CallLog.caller_user_id == caller_user_id,
-            CallLog.outcome == 2,  # call_back
+            CallLog.outcome == outcome,
             CallLog.callback_at.is_not(None),
         )
         if upcoming_only:
@@ -57,6 +65,14 @@ class CallLogCRUD:
         stmt = stmt.order_by(CallLog.callback_at.asc())
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    async def list_callbacks_for_caller(
+        db: AsyncSession, caller_user_id: int, *, upcoming_only: bool = False
+    ) -> list[CallLog]:
+        return await CallLogCRUD.list_calls_by_outcome_for_caller(
+            db, caller_user_id, outcome=2, upcoming_only=upcoming_only
+        )
 
     @staticmethod
     async def record(db: AsyncSession, **fields) -> CallLog:

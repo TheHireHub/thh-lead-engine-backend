@@ -83,6 +83,34 @@ async def list_callbacks_for(
     return ok([_serialize(c) for c in rows])
 
 
+@router.get("/demos")
+async def list_my_demos(
+    upcoming_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_caller),
+) -> dict:
+    """Caller's own scheduled demos — outcome=demo_scheduled (4) with a
+    callback_at time set. Powers the Sales Dashboard "Upcoming Demos" panel."""
+    rows = await CallLogCRUD.list_calls_by_outcome_for_caller(
+        db, user.id, outcome=4, upcoming_only=upcoming_only
+    )
+    return ok([_serialize(c) for c in rows])
+
+
+@router.get("/demos/{caller_user_id}")
+async def list_demos_for(
+    caller_user_id: int,
+    upcoming_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_admin),
+) -> dict:
+    """Admin-only — view another caller's scheduled demos."""
+    rows = await CallLogCRUD.list_calls_by_outcome_for_caller(
+        db, caller_user_id, outcome=4, upcoming_only=upcoming_only
+    )
+    return ok([_serialize(c) for c in rows])
+
+
 # --- daily aggregates (Sales Dashboard / Prospects chips) -----------------
 
 # CALL_OUTCOMES §6.26 keys, in canonical order. Every response always reports
