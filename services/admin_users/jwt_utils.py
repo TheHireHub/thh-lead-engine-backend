@@ -21,8 +21,18 @@ AUTH_COOKIE_NAME = "lead_engine_session"
 _JWT_ALGORITHM = "HS256"
 
 
+_DEV_JWT_DEFAULT = "dev-jwt-secret-change-me"
+
+
 def _jwt_secret() -> str:
-    return os.getenv("JWT_SECRET_KEY", "dev-jwt-secret-change-me")
+    secret = os.getenv("JWT_SECRET_KEY", _DEV_JWT_DEFAULT)
+    if (os.getenv("APP_ENV", "development").lower() == "production") and (
+        not secret or secret == _DEV_JWT_DEFAULT or "change-me" in secret.lower()
+    ):
+        raise RuntimeError(
+            "JWT_SECRET_KEY must be set to a strong, non-default value in production"
+        )
+    return secret
 
 
 def _jwt_ttl_hours() -> int:
@@ -31,6 +41,14 @@ def _jwt_ttl_hours() -> int:
 
 def _cookie_secure() -> bool:
     return os.getenv("SESSION_COOKIE_SECURE", "False").lower() == "true"
+
+
+def _cookie_domain() -> str | None:
+    return os.getenv("SESSION_COOKIE_DOMAIN") or None
+
+
+def _cookie_samesite() -> str:
+    return os.getenv("SESSION_COOKIE_SAMESITE", "lax").lower()
 
 
 def hash_password(plain: str) -> str:
@@ -72,8 +90,9 @@ def set_auth_cookie(response: Response, token: str, max_age_seconds: int) -> Non
         max_age=max_age_seconds,
         httponly=True,
         secure=_cookie_secure(),
-        samesite="lax",
+        samesite=_cookie_samesite(),
         path="/",
+        domain=_cookie_domain(),
     )
 
 
@@ -83,5 +102,6 @@ def clear_auth_cookie(response: Response) -> None:
         path="/",
         httponly=True,
         secure=_cookie_secure(),
-        samesite="lax",
+        samesite=_cookie_samesite(),
+        domain=_cookie_domain(),
     )
