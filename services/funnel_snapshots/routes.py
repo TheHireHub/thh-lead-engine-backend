@@ -228,6 +228,16 @@ async def conversion_rates(
         db, from_date=from_date, to_date=to_date
     )
 
+    # Snapshot worker (ARQ) populates `funnel_daily_snapshots` once a day.
+    # In dev (no Redis/no worker) and on a fresh deploy before the first
+    # daily run, that table is empty and stage_totals comes back all zeros,
+    # which renders as a meaningless "0% conversion" on every Mgmt Board.
+    # Fall back to live `prospects` counts so the dashboard is never blank.
+    # The shape stays the same; the numbers are just point-in-time instead
+    # of range-summed (BUG-015).
+    if not any(stage_totals.values()):
+        stage_totals = await FunnelSnapshotCRUD.today_live_counts_by_stage(db)
+
     cold = stage_totals.get(0, 0)
     curious = stage_totals.get(1, 0)
     converted = stage_totals.get(2, 0)
