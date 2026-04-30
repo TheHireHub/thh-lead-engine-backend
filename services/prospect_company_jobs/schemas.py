@@ -24,6 +24,7 @@ class JobCreate(BaseModel):
     source_external_id: Optional[str] = None
     jd_url: Optional[str] = None
     posting_url: Optional[str] = Field(default=None, max_length=500)
+    expectation_target: Optional[int] = Field(default=None, ge=1, le=9999)
     notes: Optional[str] = None
 
 
