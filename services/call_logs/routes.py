@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.crud import AdminUserCRUD
 from services.admin_users.deps import (
+    current_user,
     require_admin,
     require_caller,
     require_dashboard_read,
@@ -111,7 +112,10 @@ async def daily_stats(
     date: Optional[date_t] = None,
     owner_user_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(require_dashboard_read),
+    # Auth-only: callers (role 4) need access to their *own* daily-stats
+    # for the "Next Prospect" view — the per-user check below already
+    # blocks cross-rep snooping for non-admins (BUG-016).
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     """
     Per-caller daily call counters (powers Sales Dashboard KPI strip +
@@ -166,7 +170,9 @@ async def call_queue(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(require_dashboard_read),
+    # Auth-only: same reasoning as /daily-stats — caller must read their
+    # own queue (BUG-016). Per-user check below covers non-admin scoping.
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     """
     Caller's eligible call queue (Schema doc §5.5 ordering — never-touched
