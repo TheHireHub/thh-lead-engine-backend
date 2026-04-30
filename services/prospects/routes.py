@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.crud import AdminUserCRUD
 from services.admin_users.deps import (
     require_admin,
     require_dashboard_read,
@@ -51,10 +52,12 @@ router = APIRouter(prefix="/api/prospects", tags=["prospects"])
 _URGENT_WINDOW = timedelta(minutes=60)
 
 
-def _serialize(p) -> dict:
+def _serialize(p, owner_names: dict[int, str] | None = None) -> dict:
     out = ProspectOut.model_validate(p).model_dump(mode="json")
     out["stage_label"] = get_label(FUNNEL_STAGES, p.stage)
     out["source_channel_label"] = get_label(CHANNELS, p.source_channel)
+    if owner_names is not None and p.owner_user_id is not None:
+        out["owner_name"] = owner_names.get(p.owner_user_id)
     return out
 
 
@@ -132,7 +135,9 @@ async def list_prospects(
     without a second round-trip. See BACKEND_CHANGES_PENDING.md item 9b.
     """
     prospects = await ProspectCRUD.list_by_stage(db, stage=stage, limit=limit, offset=offset)
-    rows = [_serialize(p) for p in prospects]
+    owner_ids = [p.owner_user_id for p in prospects if p.owner_user_id is not None]
+    owner_names = await AdminUserCRUD.names_by_ids(db, owner_ids)
+    rows = [_serialize(p, owner_names) for p in prospects]
     if prospects:
         latest = await CallLogCRUD.latest_per_prospect(db, [p.id for p in prospects])
         for row, prospect in zip(rows, prospects):
@@ -236,7 +241,10 @@ async def get_prospect(
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="prospect not found")
-    out = _serialize(prospect)
+    owner_names = await AdminUserCRUD.names_by_ids(
+        db, [prospect.owner_user_id] if prospect.owner_user_id else []
+    )
+    out = _serialize(prospect, owner_names)
     latest = await CallLogCRUD.latest_per_prospect(db, [prospect.id])
     _attach_latest_call(out, latest.get(prospect.id))
     return ok(out)

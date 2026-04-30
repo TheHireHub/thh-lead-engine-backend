@@ -41,6 +41,27 @@ class AdminUserCRUD:
         return list(result.scalars().all())
 
     @staticmethod
+    async def names_by_ids(db: AsyncSession, ids: list[int]) -> dict[int, str]:
+        """
+        Batch-resolve admin user IDs to display names. Used by list endpoints
+        that need to project an `owner_name` column without an N+1 (BUG-008).
+        Returns `{id: "First Last"}` (last name omitted if NULL/empty).
+        Soft-deleted users are excluded.
+        """
+        if not ids:
+            return {}
+        result = await db.execute(
+            select(AdminUser.id, AdminUser.first_name, AdminUser.last_name).where(
+                AdminUser.id.in_(set(ids)), AdminUser.deleted_at.is_(None)
+            )
+        )
+        out: dict[int, str] = {}
+        for row in result:
+            full = row.first_name + (f" {row.last_name}" if row.last_name else "")
+            out[row.id] = full
+        return out
+
+    @staticmethod
     async def create(
         db: AsyncSession,
         *,
