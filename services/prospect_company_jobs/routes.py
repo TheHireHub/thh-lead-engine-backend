@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import require_csm, require_internal
+from services.admin_users.deps import (
+    ROLE_ADMIN,
+    require_admin,
+    require_csm,
+    require_internal,
+)
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -16,6 +21,7 @@ from services.common.envelope import ok
 from .crud import (
     JobBoardCRUD,
     JobCandidateCRUD,
+    JobCandidateNoteCRUD,
     JobCRUD,
     JobHistoryCRUD,
     group_by_company,
@@ -36,6 +42,9 @@ from .schemas import (
     BoardMarkFailedPayload,
     BoardMarkPostedPayload,
     CandidateMatchCreate,
+    CandidateNoteCreate,
+    CandidateNoteOut,
+    CandidateNoteUpdate,
     CandidateOut,
     CandidateStatusUpdate,
     JobBoardOut,
@@ -490,3 +499,103 @@ async def delete_candidate(
         action="delete",
     )
     return ok(message="candidate deleted")
+
+
+# --------------------------------------------------------------- candidate notes
+#
+# Append-only notes per candidate. The legacy `decision_notes` TEXT column
+# on the candidate is still used by Change-Status flows but is overwritten
+# on each save; this is the surface for note history that the UI reads.
+
+def _serialize_candidate_note(n) -> dict:
+    return CandidateNoteOut.model_validate(n).model_dump(mode="json")
+
+
+@router.get("/candidates/{candidate_id}/notes")
+async def list_candidate_notes(
+    candidate_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_internal),
+) -> dict:
+    cand = await JobCandidateCRUD.get_by_id(db, candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    rows = await JobCandidateNoteCRUD.list_for_candidate(db, candidate_id)
+    return ok([_serialize_candidate_note(r) for r in rows])
+
+
+@router.post(
+    "/candidates/{candidate_id}/notes",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_candidate_note(
+    candidate_id: int,
+    payload: CandidateNoteCreate,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_csm),
+) -> dict:
+    cand = await JobCandidateCRUD.get_by_id(db, candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    note = await JobCandidateNoteCRUD.create(
+        db,
+        candidate_id=candidate_id,
+        body=payload.body,
+        created_by_user_id=user.id,
+    )
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect_company_job_candidate_note",
+        entity_id=note.id,
+        action="create",
+        after_json={"candidate_id": candidate_id},
+    )
+    return ok(_serialize_candidate_note(note), message="note added")
+
+
+@router.patch("/candidates/notes/{note_id}")
+async def update_candidate_note(
+    note_id: int,
+    payload: CandidateNoteUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_csm),
+) -> dict:
+    note = await JobCandidateNoteCRUD.get_by_id(db, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    # Authors can edit their own; admins can edit any.
+    if note.created_by_user_id != user.id and user.role != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="cannot edit another user's note",
+        )
+    note = await JobCandidateNoteCRUD.update_body(db, note, body=payload.body)
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect_company_job_candidate_note",
+        entity_id=note.id,
+        action="update",
+    )
+    return ok(_serialize_candidate_note(note), message="note updated")
+
+
+@router.delete("/candidates/notes/{note_id}")
+async def delete_candidate_note(
+    note_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_admin),
+) -> dict:
+    note = await JobCandidateNoteCRUD.get_by_id(db, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    await JobCandidateNoteCRUD.soft_delete(db, note)
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect_company_job_candidate_note",
+        entity_id=note_id,
+        action="delete",
+    )
+    return ok(message="note deleted")

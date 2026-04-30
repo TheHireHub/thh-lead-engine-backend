@@ -157,3 +157,23 @@ class CandidateOut(BaseModel):
     prepared_by_user_id: int
     created_at: datetime
     updated_at: datetime
+
+
+# ----------------------------- candidate notes (append-only)
+
+class CandidateNoteCreate(BaseModel):
+    body: str = Field(min_length=1)
+
+
+class CandidateNoteUpdate(BaseModel):
+    body: str = Field(min_length=1)
+
+
+class CandidateNoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    candidate_id: int
+    body: str
+    created_by_user_id: int
+    created_at: datetime
+    updated_at: datetime

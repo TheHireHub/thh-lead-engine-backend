@@ -2,10 +2,11 @@
 SQLAlchemy models for prospect_company_jobs subsystem (§7.21-§7.24).
 
 Tables:
-- prospect_company_jobs            — open jobs at prospect companies (sales hooks)
-- prospect_company_job_candidates  — candidate matches per job
-- prospect_company_job_history     — field-change audit per job
-- prospect_company_job_boards      — junction: job × board, per-board posting state
+- prospect_company_jobs                  — open jobs at prospect companies (sales hooks)
+- prospect_company_job_candidates        — candidate matches per job
+- prospect_company_job_history           — field-change audit per job
+- prospect_company_job_boards            — junction: job × board, per-board posting state
+- prospect_company_job_candidate_notes   — append-only notes per candidate
 """
 
 from __future__ import annotations
@@ -195,6 +196,52 @@ class ProspectCompanyJobBoard(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False,
+        server_default=func.current_timestamp(),
+        server_onupdate=func.current_timestamp(),
+    )
+
+
+# ----------------------------- append-only notes per candidate (§7.22.1)
+class ProspectCompanyJobCandidateNote(Base):
+    """Append-only notes per candidate.
+
+    Sibling to ProspectCompanyJobCandidate.decision_notes (a legacy single
+    TEXT column kept for the Change-Status-with-note flow). New "Add Note"
+    UX writes here so each note is preserved with author attribution and
+    can be displayed back as a thread on the CSM candidate card.
+    """
+
+    __tablename__ = "prospect_company_job_candidate_notes"
+    __table_args__ = (
+        Index("idx_pcjcn_candidate_id", "candidate_id"),
+        Index("idx_pcjcn_created_by", "created_by_user_id"),
+        Index("idx_pcjcn_deleted_at", "deleted_at"),
+        {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "prospect_company_job_candidates.id",
+            ondelete="CASCADE",
+            onupdate="CASCADE",
+        ),
+        nullable=False,
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("admin_users.id", ondelete="RESTRICT", onupdate="CASCADE"),
+        nullable=False,
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
         server_default=func.current_timestamp(),
         server_onupdate=func.current_timestamp(),
     )

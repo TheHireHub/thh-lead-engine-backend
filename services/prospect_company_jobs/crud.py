@@ -23,6 +23,7 @@ from .models import (
     ProspectCompanyJob,
     ProspectCompanyJobBoard,
     ProspectCompanyJobCandidate,
+    ProspectCompanyJobCandidateNote,
     ProspectCompanyJobHistory,
 )
 
@@ -398,6 +399,66 @@ async def _bump_candidates_count(db: AsyncSession, job_id: int, delta: int) -> N
         return
     job.candidates_prepared = max(0, (job.candidates_prepared or 0) + delta)
     await db.commit()
+
+
+class JobCandidateNoteCRUD:
+    """Append-only notes per candidate. Each row is one note; edits stay
+    in-place on the same row, deletes are soft (Arch-19)."""
+
+    @staticmethod
+    async def get_by_id(
+        db: AsyncSession, note_id: int
+    ) -> Optional[ProspectCompanyJobCandidateNote]:
+        result = await db.execute(
+            select(ProspectCompanyJobCandidateNote).where(
+                ProspectCompanyJobCandidateNote.id == note_id,
+                ProspectCompanyJobCandidateNote.deleted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def list_for_candidate(
+        db: AsyncSession, candidate_id: int
+    ) -> list[ProspectCompanyJobCandidateNote]:
+        result = await db.execute(
+            select(ProspectCompanyJobCandidateNote)
+            .where(
+                ProspectCompanyJobCandidateNote.candidate_id == candidate_id,
+                ProspectCompanyJobCandidateNote.deleted_at.is_(None),
+            )
+            .order_by(ProspectCompanyJobCandidateNote.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def create(
+        db: AsyncSession, **fields
+    ) -> ProspectCompanyJobCandidateNote:
+        row = ProspectCompanyJobCandidateNote(**fields)
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+        return row
+
+    @staticmethod
+    async def update_body(
+        db: AsyncSession,
+        note: ProspectCompanyJobCandidateNote,
+        *,
+        body: str,
+    ) -> ProspectCompanyJobCandidateNote:
+        note.body = body
+        await db.commit()
+        await db.refresh(note)
+        return note
+
+    @staticmethod
+    async def soft_delete(
+        db: AsyncSession, note: ProspectCompanyJobCandidateNote
+    ) -> None:
+        note.deleted_at = datetime.now(timezone.utc)
+        await db.commit()
 
 
 class JobHistoryCRUD:
