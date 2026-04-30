@@ -49,7 +49,7 @@ def _bucket_key(d: date, mode: SnapshotMode) -> tuple[str, date]:
     return d.isoformat(), d  # daily
 
 
-@router.get("/")
+@router.get("")
 async def list_snapshots(
     from_date: date = Query(...),
     to_date: date = Query(...),

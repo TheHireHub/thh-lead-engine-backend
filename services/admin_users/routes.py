@@ -98,7 +98,7 @@ async def me(user: AdminUser = Depends(current_user)) -> dict:
 # ---------------------------------------------------------------------------
 # /api/admin-users — admin-only management (role 0 per §6.1)
 # ---------------------------------------------------------------------------
-@users_router.get("/")
+@users_router.get("")
 async def list_users(
     role: int | None = None,
     db: AsyncSession = Depends(get_db),
@@ -120,7 +120,7 @@ async def get_user(
     return ok(_serialize(user))
 
 
-@users_router.post("/", status_code=status.HTTP_201_CREATED)
+@users_router.post("", status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: AdminUserCreate,
     request: Request,

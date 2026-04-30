@@ -41,7 +41,7 @@ def _serialize(s) -> dict:
     return out
 
 
-@router.get("/")
+@router.get("")
 async def list_signups(
     request_type: Optional[int] = None,
     otp_verified: Optional[bool] = None,
@@ -60,7 +60,7 @@ async def list_signups(
     return ok([_serialize(s) for s in rows])
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_signup(payload: SignupCreate, db: AsyncSession = Depends(get_db)) -> dict:
     """
     Public endpoint. Called when a prospect submits the landing page form.

@@ -33,7 +33,7 @@ def _audit_payload(company) -> dict:
     return {"name": company.name, "domain": company.domain, "source": company.source}
 
 
-@router.get("/")
+@router.get("")
 async def list_companies(
     source: int | None = None,
     industry: str | None = None,
@@ -79,7 +79,7 @@ async def check_domain(
     return ok({"exists": company is not None, "company_id": company.id if company else None})
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_company(
     payload: CompanyCreate,
     request: Request,
