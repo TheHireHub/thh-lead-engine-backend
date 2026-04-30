@@ -8,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.deps import (
     require_admin,
-    require_dashboard_read,
     require_growth,
+    require_internal,
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
@@ -65,7 +65,7 @@ async def list_campaigns(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await CampaignCRUD.list_all(
         db, status=status, channel=channel, limit=limit, offset=offset
@@ -77,7 +77,7 @@ async def list_campaigns(
 async def get_campaign(
     campaign_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     campaign = await CampaignCRUD.get_by_id(db, campaign_id)
     if not campaign:
@@ -206,7 +206,7 @@ async def list_campaign_prospects(
     limit: int = 500,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await CampaignProspectCRUD.list_for_campaign(
         db, campaign_id, status=status, limit=limit, offset=offset
@@ -241,7 +241,7 @@ async def list_campaign_events(
     event_type: int | None = None,
     limit: int = 500,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await CampaignEventCRUD.list_for_campaign(
         db, campaign_id, event_type=event_type, limit=limit
@@ -266,7 +266,7 @@ async def list_campaign_events(
 async def campaign_funnel(
     campaign_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Aggregate counts by event_type — feeds the campaign funnel viz."""
     counts = await CampaignEventCRUD.count_by_event_type(db, campaign_id)
