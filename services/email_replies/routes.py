@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.deps import (
     require_growth_or_bdr,
-    require_internal,
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
@@ -69,7 +68,7 @@ async def list_replies(
     limit: int = 200,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     rows = await EmailReplyCRUD.list_recent(
         db, classification=classification, limit=limit, offset=offset
@@ -82,7 +81,7 @@ async def list_needs_review(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     rows = await EmailReplyCRUD.list_needs_review(db, limit=limit, offset=offset)
     return ok([_serialize(r) for r in rows])
@@ -92,7 +91,7 @@ async def list_needs_review(
 async def list_for_prospect(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     rows = await EmailReplyCRUD.list_for_prospect(db, prospect_id)
     return ok([_serialize(r) for r in rows])
@@ -102,7 +101,7 @@ async def list_for_prospect(
 async def get_reply(
     reply_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
     reply = await EmailReplyCRUD.get_by_id(db, reply_id)
     if not reply:
