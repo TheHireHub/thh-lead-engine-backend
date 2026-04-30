@@ -64,3 +64,24 @@ class AuditLogCRUD:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    @staticmethod
+    async def list_by_action(
+        db: AsyncSession, action: str, limit: int = 100, offset: int = 0
+    ) -> list[AuditLog]:
+        result = await db.execute(
+            select(AuditLog)
+            .where(AuditLog.action == action)
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def list_recent(db: AsyncSession, limit: int = 50) -> list[AuditLog]:
+        """Last N audit events across all entities. Powers the admin Audit Log page."""
+        result = await db.execute(
+            select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
+        )
+        return list(result.scalars().all())

@@ -19,3 +19,4 @@ graphify-out/.graphify_python
 graphify-output/
 .graphify/
 *.graphify.json
+graphify-out/.graphify_incremental.json

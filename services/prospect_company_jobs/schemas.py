@@ -23,6 +23,7 @@ class JobCreate(BaseModel):
     source_url: Optional[str] = None
     source_external_id: Optional[str] = None
     jd_url: Optional[str] = None
+    posting_url: Optional[str] = Field(default=None, max_length=500)
     notes: Optional[str] = None
 
 
@@ -33,6 +34,7 @@ class JobUpdate(BaseModel):
     confidentiality: Optional[int] = Field(default=None, ge=0, le=1)
     no_linkedin_post: Optional[int] = Field(default=None, ge=0, le=1)
     assigned_to_csm_user_id: Optional[int] = None
+    posting_url: Optional[str] = Field(default=None, max_length=500)
     notes: Optional[str] = None
 
 
@@ -61,6 +63,8 @@ class JobOut(BaseModel):
     target_met_at: Optional[datetime]
     total_applicants: int
     assigned_to_csm_user_id: Optional[int]
+    posting_url: Optional[str] = None
+    jd_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -83,3 +87,73 @@ class CandidateMatchCreate(BaseModel):
     match_score: Optional[float] = Field(default=None, ge=0, le=1)
     match_method: int = Field(default=0, ge=0, le=2)
     match_notes: Optional[str] = None
+
+
+class CandidateStatusUpdate(BaseModel):
+    status: int = Field(ge=0, le=5, description="see JOB_CANDIDATE_STATUSES §6.23")
+    decision_notes: Optional[str] = None
+
+
+class JobBoardOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    prospect_company_job_id: int
+    board: int
+    board_label: Optional[str] = None
+    status: int
+    status_label: Optional[str] = None
+    external_url: Optional[str]
+    posted_at: Optional[datetime]
+    removed_at: Optional[datetime]
+    applicant_count: int
+    notes: Optional[str]
+    posted_by_user_id: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+
+class BoardMarkPostedPayload(BaseModel):
+    external_url: Optional[str] = None
+
+
+class BoardMarkFailedPayload(BaseModel):
+    notes: Optional[str] = None
+
+
+class ApplicantCountPayload(BaseModel):
+    board: int = Field(ge=0, le=8, description="JOB_BOARDS §6.27")
+    applicant_count: int = Field(ge=0)
+
+
+class JobHistoryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    prospect_company_job_id: int
+    field_name: str
+    from_value: Optional[str]
+    to_value: Optional[str]
+    reason: Optional[str]
+    changed_by_user_id: Optional[int]
+    changed_at: datetime
+
+
+class CandidateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    prospect_company_job_id: int
+    thh_candidate_id: Optional[int]
+    candidate_name: str
+    candidate_title: Optional[str]
+    candidate_linkedin_url: Optional[str]
+    candidate_summary: Optional[str]
+    match_score: Optional[float]
+    match_method: int
+    match_method_label: Optional[str] = None
+    status: int
+    status_label: Optional[str] = None
+    presented_at: Optional[datetime]
+    decided_at: Optional[datetime]
+    decision_notes: Optional[str]
+    prepared_by_user_id: int
+    created_at: datetime
+    updated_at: datetime

@@ -35,6 +35,44 @@ for noisy in ("httpx", "httpcore", "urllib3"):
 logger = logging.getLogger(__name__)
 
 
+APP_ENV = os.getenv("APP_ENV", os.getenv("FLASK_ENV", "development")).lower()
+IS_PROD = APP_ENV == "production"
+
+
+def _validate_env() -> None:
+    """
+    Fail fast in production if required secrets are unset or still hold
+    obvious dev placeholders. Dev/test envs skip this and lean on defaults
+    so local bootstrap stays painless.
+    """
+    if not IS_PROD:
+        return
+
+    required = [
+        "JWT_SECRET_KEY",
+        "VISITOR_IP_HASH_SECRET",
+        "UNSUBSCRIBE_TOKEN_SECRET",
+        "MYSQL_PASSWORD",
+        "CORS_ALLOWED_ORIGINS",
+        "SESSION_COOKIE_SECURE",
+    ]
+    bad: list[str] = []
+    for key in required:
+        val = (os.getenv(key) or "").strip()
+        if not val or "change-me" in val.lower() or val.lower().startswith("dev-"):
+            bad.append(key)
+    if os.getenv("SESSION_COOKIE_SECURE", "False").lower() != "true":
+        bad.append("SESSION_COOKIE_SECURE (must be True in production)")
+    if bad:
+        raise RuntimeError(
+            "Production startup blocked. These env vars are unset or use "
+            f"dev defaults: {', '.join(bad)}. See env.example for guidance."
+        )
+
+
+_validate_env()
+
+
 # ---------------------------------------------------------------------------
 # Service router imports
 # ---------------------------------------------------------------------------
@@ -74,6 +112,11 @@ app = FastAPI(
     version="0.1.0",
     description="Outbound growth / prospect-conversion system for The HireHub.",
     lifespan=lifespan,
+    # /docs, /redoc, /openapi.json are off in prod unless EXPOSE_DOCS=true.
+    # Override locally with EXPOSE_DOCS=true in your .env if you need them.
+    docs_url=None if IS_PROD and os.getenv("EXPOSE_DOCS", "false").lower() != "true" else "/docs",
+    redoc_url=None if IS_PROD and os.getenv("EXPOSE_DOCS", "false").lower() != "true" else "/redoc",
+    openapi_url=None if IS_PROD and os.getenv("EXPOSE_DOCS", "false").lower() != "true" else "/openapi.json",
 )
 
 
@@ -117,7 +160,7 @@ async def unhandled_exception_handler(request, exc: Exception):
             "success": False,
             "message": "Internal server error",
             "data": None,
-            "error": str(exc) if os.getenv("FLASK_ENV") == "development" else None,
+            "error": None if IS_PROD else str(exc),
         },
     )
 

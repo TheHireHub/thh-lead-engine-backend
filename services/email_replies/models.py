@@ -31,6 +31,11 @@ class EmailReply(Base):
     )
     raw_body: Mapped[str] = mapped_column(Text, nullable=False)
     subject: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    from_address: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="reply sender email; nullable for pre-existing rows",
+    )
     classification: Mapped[int] = mapped_column(TINYINT(unsigned=True), nullable=False, comment="see REPLY_CLASSIFICATIONS §6.8")
     classified_by: Mapped[int] = mapped_column(TINYINT(unsigned=True), nullable=False, default=0, comment="see REPLY_CLASSIFIED_BY §6.9")
     classifier_confidence: Mapped[Optional[float]] = mapped_column(Numeric(4, 3), nullable=True)

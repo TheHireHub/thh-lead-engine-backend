@@ -50,6 +50,9 @@ class ProspectOut(BaseModel):
     owner_user_id: Optional[int]
     apollo_contact_id: Optional[str]
     thh_user_id: Optional[int]
+    first_touched_at: Optional[datetime]
+    last_touched_at: Optional[datetime]
+    touch_count: int
     registered_at: Optional[datetime]
     demo_booked_at: Optional[datetime]
     first_job_created_at: Optional[datetime]
@@ -65,3 +68,13 @@ class ProspectOut(BaseModel):
 class StageChange(BaseModel):
     to_stage: int = Field(ge=0, le=4)
     reason: Optional[str] = Field(default=None, max_length=255)
+
+
+class TouchRequest(BaseModel):
+    channel: int = Field(ge=0, le=12, description="see CHANNELS §6.3")
+
+
+class MergeDecision(BaseModel):
+    decision: str = Field(pattern="^(merged|rejected)$")
+    kept_prospect_id: Optional[int] = None
+    merged_prospect_id: Optional[int] = None

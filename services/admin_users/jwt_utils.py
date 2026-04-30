@@ -1,12 +1,10 @@
 """
-Auth helpers for admin_users (Schema doc Arch-23, §7.1, §6.1).
+JWT + cookie helpers for admin auth (Schema doc Arch-23).
 
-DB-agnostic per CLAUDE.md "Services / integrations" rules — these functions
-take primitives or framework objects and never touch `AsyncSession`.
+DB-agnostic per CLAUDE.md "Services / integrations" rules — no AsyncSession.
 
-Token transport: JWT in an httpOnly + Secure + SameSite=Lax cookie. Never
-localStorage. 2FA deferred (Ishank lock per Arch-23). Federated THH-JWT
-login is §9.6 v2.
+Token transport: JWT in an httpOnly + Secure + SameSite=Lax cookie named
+`lead_engine_session` (frontend `src/middleware.ts` checks for this name).
 """
 
 from __future__ import annotations
@@ -19,12 +17,22 @@ import bcrypt
 import jwt
 from fastapi import Response
 
-AUTH_COOKIE_NAME = "lead_engine_auth"
+AUTH_COOKIE_NAME = "lead_engine_session"
 _JWT_ALGORITHM = "HS256"
 
 
+_DEV_JWT_DEFAULT = "dev-jwt-secret-change-me"
+
+
 def _jwt_secret() -> str:
-    return os.getenv("JWT_SECRET_KEY", "dev-jwt-secret-change-me")
+    secret = os.getenv("JWT_SECRET_KEY", _DEV_JWT_DEFAULT)
+    if (os.getenv("APP_ENV", "development").lower() == "production") and (
+        not secret or secret == _DEV_JWT_DEFAULT or "change-me" in secret.lower()
+    ):
+        raise RuntimeError(
+            "JWT_SECRET_KEY must be set to a strong, non-default value in production"
+        )
+    return secret
 
 
 def _jwt_ttl_hours() -> int:
@@ -33,6 +41,14 @@ def _jwt_ttl_hours() -> int:
 
 def _cookie_secure() -> bool:
     return os.getenv("SESSION_COOKIE_SECURE", "False").lower() == "true"
+
+
+def _cookie_domain() -> str | None:
+    return os.getenv("SESSION_COOKIE_DOMAIN") or None
+
+
+def _cookie_samesite() -> str:
+    return os.getenv("SESSION_COOKIE_SAMESITE", "lax").lower()
 
 
 def hash_password(plain: str) -> str:
@@ -46,13 +62,14 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def encode_jwt(*, user_id: int, role: int) -> tuple[str, int]:
-    """Return (token, max_age_seconds)."""
+def create_access_token(*, user_id: int, role: int) -> tuple[str, int]:
+    """Returns (token, max_age_seconds)."""
     ttl = _jwt_ttl_hours()
     now = datetime.now(timezone.utc)
     exp = now + timedelta(hours=ttl)
     payload: dict[str, Any] = {
         "sub": str(user_id),
+        "user_id": user_id,
         "role": role,
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),
@@ -61,7 +78,7 @@ def encode_jwt(*, user_id: int, role: int) -> tuple[str, int]:
     return token, ttl * 3600
 
 
-def decode_jwt(token: str) -> dict[str, Any]:
+def decode_access_token(token: str) -> dict[str, Any]:
     """Raise jwt.InvalidTokenError subclasses on failure."""
     return jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
 
@@ -73,8 +90,9 @@ def set_auth_cookie(response: Response, token: str, max_age_seconds: int) -> Non
         max_age=max_age_seconds,
         httponly=True,
         secure=_cookie_secure(),
-        samesite="lax",
+        samesite=_cookie_samesite(),
         path="/",
+        domain=_cookie_domain(),
     )
 
 
@@ -84,5 +102,6 @@ def clear_auth_cookie(response: Response) -> None:
         path="/",
         httponly=True,
         secure=_cookie_secure(),
-        samesite="lax",
+        samesite=_cookie_samesite(),
+        domain=_cookie_domain(),
     )

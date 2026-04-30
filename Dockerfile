@@ -24,6 +24,9 @@ RUN mkdir -p /app/logs && chown -R appuser:appuser /app
 
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+USER appuser
+
 ENTRYPOINT ["/app/entrypoint.sh"]
 
 EXPOSE 5050
