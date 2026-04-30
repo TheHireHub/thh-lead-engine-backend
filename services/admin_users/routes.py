@@ -125,7 +125,7 @@ async def list_team(
     return ok(out)
 
 
-@users_router.get("/")
+@users_router.get("")
 async def list_users(
     role: int | None = None,
     db: AsyncSession = Depends(get_db),
@@ -147,7 +147,7 @@ async def get_user(
     return ok(_serialize(user))
 
 
-@users_router.post("/", status_code=status.HTTP_201_CREATED)
+@users_router.post("", status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: AdminUserCreate,
     request: Request,

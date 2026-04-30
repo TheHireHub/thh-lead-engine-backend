@@ -78,7 +78,7 @@ def _serialize_candidate(c) -> dict:
 
 # --------------------------------------------------------------- jobs (read)
 
-@router.get("/")
+@router.get("")
 async def list_jobs(
     company_id: Optional[int] = None,
     status: Optional[int] = Query(default=None, ge=0, le=4),
@@ -221,7 +221,7 @@ async def posting_helper(job_id: int, db: AsyncSession = Depends(get_db),
 
 # --------------------------------------------------------------- jobs (write)
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_job(payload: JobCreate, db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_csm),
 ) -> dict:

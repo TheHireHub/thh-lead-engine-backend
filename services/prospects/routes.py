@@ -120,7 +120,7 @@ async def _quality_for_prospect(db: AsyncSession, prospect) -> int:
     )
 
 
-@router.get("/")
+@router.get("")
 async def list_prospects(
     stage: int | None = None,
     limit: int = 100,
@@ -391,7 +391,7 @@ async def get_stage_history(
     )
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_prospect(
     payload: ProspectCreate,
     request: Request,

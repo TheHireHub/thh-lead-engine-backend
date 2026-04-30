@@ -62,7 +62,7 @@ async def _propagate_reply_side_effects(db: AsyncSession, reply) -> None:
         )
 
 
-@router.get("/")
+@router.get("")
 async def list_replies(
     classification: int | None = None,
     limit: int = 200,
@@ -109,7 +109,7 @@ async def get_reply(
     return ok(_serialize(reply))
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def record_reply(
     payload: EmailReplyCreate,
     request: Request,

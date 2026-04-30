@@ -36,7 +36,7 @@ router = APIRouter(prefix="/api/landing-pages", tags=["landing_pages"])
 
 # --------------------------------------------------------------- pages
 
-@router.get("/")
+@router.get("")
 async def list_pages(
     prospect_id: Optional[int] = None,
     company_id: Optional[int] = None,
@@ -99,7 +99,7 @@ async def render_by_slug(
     )
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_page(
     payload: LandingPageCreate,
     db: AsyncSession = Depends(get_db),

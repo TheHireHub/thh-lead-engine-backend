@@ -58,7 +58,7 @@ def _audit_payload(c) -> dict:
     return {"name": c.name, "channel": c.channel, "status": c.status}
 
 
-@router.get("/")
+@router.get("")
 async def list_campaigns(
     status: int | None = None,
     channel: int | None = None,
@@ -85,7 +85,7 @@ async def get_campaign(
     return ok(_serialize(campaign))
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_campaign(
     payload: CampaignCreate,
     request: Request,

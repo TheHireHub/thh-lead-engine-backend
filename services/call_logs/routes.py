@@ -240,7 +240,7 @@ async def skip_prospect(
     return ok({"prospect_id": payload.prospect_id}, message="skipped")
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def record_call(
     payload: CallLogCreate,
     db: AsyncSession = Depends(get_db),

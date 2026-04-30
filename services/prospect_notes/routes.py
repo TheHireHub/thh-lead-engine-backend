@@ -27,7 +27,7 @@ def _serialize(n) -> dict:
     return out
 
 
-@router.get("/")
+@router.get("")
 async def list_notes(
     prospect_id: int | None = None,
     status: int | None = None,
@@ -73,7 +73,7 @@ async def list_open_tasks_for(
     return ok([_serialize(n) for n in rows])
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_note(
     payload: NoteCreate,
     request: Request,
