@@ -85,14 +85,26 @@ async def create_signup(payload: SignupCreate, db: AsyncSession = Depends(get_db
 
     signup = await SignupCRUD.create(db, **signup_fields)
 
-    otp_resp = await thh_backend.send_otp(email=payload.email)
+    # OTP send is best-effort — the signup row is already persisted, and the
+    # admin signups list / resend-otp endpoint can recover from a missed
+    # send. Treat THH backend being unreachable (network error, 4xx, 5xx) as
+    # a soft failure: audit it and let the response succeed (BUG-022).
+    # Without this guard, any THH downtime caused every public LP signup to
+    # 500, even though the signup row itself was already created.
+    otp_failed_reason: dict | None = None
+    try:
+        otp_resp = await thh_backend.send_otp(email=payload.email)
+    except Exception as exc:  # noqa: BLE001 — wrap upstream failures
+        otp_failed_reason = {"exception": type(exc).__name__, "detail": str(exc)[:255]}
+        otp_resp = {"success": False}
+
     if not otp_resp.get("success"):
         await AuditLogCRUD.record(
             db,
             entity_type="signup",
             entity_id=signup.id,
             action="otp_send_failed",
-            after_json={"reason": otp_resp},
+            after_json=otp_failed_reason or {"reason": otp_resp},
         )
     else:
         _RESEND_TS[signup.id] = time.time()
