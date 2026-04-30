@@ -53,3 +53,22 @@ class AdminUserOut(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=255)
+
+
+class TeamMemberOut(BaseModel):
+    """
+    Minimal admin-user shape for non-admin "team list" reads (BUG-019).
+    Excludes email + last_login_at + created_at — anything that would leak
+    PII or activity timestamps to non-admin teammates. Used by Sales
+    Dashboard's per-rep cards and Mgmt Board's team picker.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    first_name: str
+    last_name: Optional[str]
+    role: int
+    role_label: Optional[str] = None
+    daily_call_target: int
+    avatar_color: Optional[str]
