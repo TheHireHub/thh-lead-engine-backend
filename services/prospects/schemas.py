@@ -48,6 +48,10 @@ class ProspectOut(BaseModel):
     source_channel: int
     source_channel_label: Optional[str] = None
     owner_user_id: Optional[int]
+    # Resolved server-side from `admin_users.first_name + last_name` so the
+    # FE doesn't have to issue a second round-trip per row to label owners
+    # on lists / detail (BUG-008). None when prospect is unowned.
+    owner_name: Optional[str] = None
     apollo_contact_id: Optional[str]
     thh_user_id: Optional[int]
     first_touched_at: Optional[datetime]

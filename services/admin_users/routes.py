@@ -17,7 +17,7 @@ from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
 
 from .crud import AdminUserCRUD
-from .deps import current_user, require_admin
+from .deps import current_user, require_admin, require_dashboard_read
 from .enums import ADMIN_ROLES, get_label
 from .jwt_utils import (
     clear_auth_cookie,
@@ -27,7 +27,13 @@ from .jwt_utils import (
     verify_password,
 )
 from .models import AdminUser
-from .schemas import AdminUserCreate, AdminUserOut, AdminUserUpdate, LoginRequest
+from .schemas import (
+    AdminUserCreate,
+    AdminUserOut,
+    AdminUserUpdate,
+    LoginRequest,
+    TeamMemberOut,
+)
 
 # Sub-routers (parent `router` stitched at the bottom of this file).
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -98,7 +104,28 @@ async def me(user: AdminUser = Depends(current_user)) -> dict:
 # ---------------------------------------------------------------------------
 # /api/admin-users — admin-only management (role 0 per §6.1)
 # ---------------------------------------------------------------------------
-@users_router.get("/")
+@users_router.get("/team")
+async def list_team(
+    role: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_dashboard_read),
+) -> dict:
+    """
+    Minimal team roster (id, name, role, avatar) for non-admin dashboard
+    consumers — Sales per-rep cards, Mgmt Board team list (BUG-019). No
+    email or last_login leaked. Caller (RBAC-isolated) and unauthenticated
+    requests are denied via `require_dashboard_read`.
+    """
+    users = await AdminUserCRUD.list_all(db, role=role)
+    out = []
+    for u in users:
+        member = TeamMemberOut.model_validate(u).model_dump(mode="json")
+        member["role_label"] = get_label(ADMIN_ROLES, u.role)
+        out.append(member)
+    return ok(out)
+
+
+@users_router.get("")
 async def list_users(
     role: int | None = None,
     db: AsyncSession = Depends(get_db),
@@ -120,7 +147,7 @@ async def get_user(
     return ok(_serialize(user))
 
 
-@users_router.post("/", status_code=status.HTTP_201_CREATED)
+@users_router.post("", status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: AdminUserCreate,
     request: Request,

@@ -85,7 +85,7 @@ async def _process_unsubscribe(
     return row, created
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def unsubscribe(
     payload: UnsubscribeCreate,
     request: Request,
@@ -130,7 +130,7 @@ async def unsubscribe_by_token(
     return ok(body, message=("unsubscribed" if created else "already unsubscribed"))
 
 
-@router.get("/")
+@router.get("")
 async def list_unsubscribes(
     source_campaign_id: int | None = None,
     limit: int = 200,

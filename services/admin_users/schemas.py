@@ -30,7 +30,14 @@ class AdminUserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    email: EmailStr
+    # Output uses plain `str`, not `EmailStr`. Input is still validated as
+    # EmailStr on AdminUserCreate / LoginRequest, so nothing reserved-TLD
+    # gets in via the API. But once a row exists (e.g. seeded directly into
+    # MySQL or imported from an upstream system that allows .local / .test),
+    # rejecting it at *response*-validation time turns every list call into
+    # a 500 with stripped CORS headers and is masked as a CORS error in the
+    # browser. Trust DB content for outputs (BUG-001).
+    email: str
     first_name: str
     last_name: Optional[str]
     role: int
@@ -46,3 +53,22 @@ class AdminUserOut(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=255)
+
+
+class TeamMemberOut(BaseModel):
+    """
+    Minimal admin-user shape for non-admin "team list" reads (BUG-019).
+    Excludes email + last_login_at + created_at — anything that would leak
+    PII or activity timestamps to non-admin teammates. Used by Sales
+    Dashboard's per-rep cards and Mgmt Board's team picker.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    first_name: str
+    last_name: Optional[str]
+    role: int
+    role_label: Optional[str] = None
+    daily_call_target: int
+    avatar_color: Optional[str]

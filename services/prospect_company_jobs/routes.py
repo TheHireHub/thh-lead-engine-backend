@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import require_csm, require_dashboard_read
+from services.admin_users.deps import (
+    ROLE_ADMIN,
+    require_admin,
+    require_csm,
+    require_internal,
+)
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
@@ -16,6 +21,7 @@ from services.common.envelope import ok
 from .crud import (
     JobBoardCRUD,
     JobCandidateCRUD,
+    JobCandidateNoteCRUD,
     JobCRUD,
     JobHistoryCRUD,
     group_by_company,
@@ -36,6 +42,9 @@ from .schemas import (
     BoardMarkFailedPayload,
     BoardMarkPostedPayload,
     CandidateMatchCreate,
+    CandidateNoteCreate,
+    CandidateNoteOut,
+    CandidateNoteUpdate,
     CandidateOut,
     CandidateStatusUpdate,
     JobBoardOut,
@@ -78,7 +87,7 @@ def _serialize_candidate(c) -> dict:
 
 # --------------------------------------------------------------- jobs (read)
 
-@router.get("/")
+@router.get("")
 async def list_jobs(
     company_id: Optional[int] = None,
     status: Optional[int] = Query(default=None, ge=0, le=4),
@@ -89,7 +98,7 @@ async def list_jobs(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Combined filter for the CSM Board. All params optional."""
     rows = await JobCRUD.list_filtered(
@@ -111,7 +120,7 @@ async def grouped_by_company(
     status: Optional[int] = Query(default=None, ge=0, le=4),
     paid_status: Optional[int] = Query(default=None, ge=0, le=2),
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """For the design's company-grouped CSM view (Schema doc §5.4 / §5.2)."""
     rows = await JobCRUD.list_filtered(
@@ -131,7 +140,7 @@ async def grouped_by_company(
 
 @router.get("/by-company/{company_id}")
 async def list_for_company(company_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await JobCRUD.list_for_company(db, company_id)
     return ok([_serialize_job(r) for r in rows])
@@ -140,7 +149,7 @@ async def list_for_company(company_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/at-risk")
 async def at_risk_jobs(
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Powers the Jobs at Risk CSM view (Schema doc §5.6, Arch-41)."""
     rows = await JobCRUD.list_at_risk(db)
@@ -149,7 +158,7 @@ async def at_risk_jobs(
 
 @router.get("/{job_id}")
 async def get_job(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     job = await JobCRUD.get_by_id(db, job_id)
     if not job:
@@ -162,7 +171,7 @@ async def job_history(
     job_id: int,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """Field-change audit for tracked fields (status, paid_status, confidentiality, ...)."""
     job = await JobCRUD.get_by_id(db, job_id)
@@ -174,7 +183,7 @@ async def job_history(
 
 @router.get("/{job_id}/posting-helper")
 async def posting_helper(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """
     Schema doc §5.7 (P3 PENDING).
@@ -221,7 +230,7 @@ async def posting_helper(job_id: int, db: AsyncSession = Depends(get_db),
 
 # --------------------------------------------------------------- jobs (write)
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_job(payload: JobCreate, db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_csm),
 ) -> dict:
@@ -309,7 +318,7 @@ async def distribute_job(
 
 @router.get("/{job_id}/boards")
 async def list_boards(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await JobBoardCRUD.list_for_job(db, job_id)
     return ok([_serialize_board(r) for r in rows])
@@ -417,7 +426,7 @@ async def record_applicants(
 
 @router.get("/{job_id}/candidates")
 async def list_candidates(job_id: int, db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await JobCandidateCRUD.list_for_job(db, job_id)
     return ok([_serialize_candidate(r) for r in rows])
@@ -490,3 +499,103 @@ async def delete_candidate(
         action="delete",
     )
     return ok(message="candidate deleted")
+
+
+# --------------------------------------------------------------- candidate notes
+#
+# Append-only notes per candidate. The legacy `decision_notes` TEXT column
+# on the candidate is still used by Change-Status flows but is overwritten
+# on each save; this is the surface for note history that the UI reads.
+
+def _serialize_candidate_note(n) -> dict:
+    return CandidateNoteOut.model_validate(n).model_dump(mode="json")
+
+
+@router.get("/candidates/{candidate_id}/notes")
+async def list_candidate_notes(
+    candidate_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_internal),
+) -> dict:
+    cand = await JobCandidateCRUD.get_by_id(db, candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    rows = await JobCandidateNoteCRUD.list_for_candidate(db, candidate_id)
+    return ok([_serialize_candidate_note(r) for r in rows])
+
+
+@router.post(
+    "/candidates/{candidate_id}/notes",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_candidate_note(
+    candidate_id: int,
+    payload: CandidateNoteCreate,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_csm),
+) -> dict:
+    cand = await JobCandidateCRUD.get_by_id(db, candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    note = await JobCandidateNoteCRUD.create(
+        db,
+        candidate_id=candidate_id,
+        body=payload.body,
+        created_by_user_id=user.id,
+    )
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect_company_job_candidate_note",
+        entity_id=note.id,
+        action="create",
+        after_json={"candidate_id": candidate_id},
+    )
+    return ok(_serialize_candidate_note(note), message="note added")
+
+
+@router.patch("/candidates/notes/{note_id}")
+async def update_candidate_note(
+    note_id: int,
+    payload: CandidateNoteUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_csm),
+) -> dict:
+    note = await JobCandidateNoteCRUD.get_by_id(db, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    # Authors can edit their own; admins can edit any.
+    if note.created_by_user_id != user.id and user.role != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="cannot edit another user's note",
+        )
+    note = await JobCandidateNoteCRUD.update_body(db, note, body=payload.body)
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect_company_job_candidate_note",
+        entity_id=note.id,
+        action="update",
+    )
+    return ok(_serialize_candidate_note(note), message="note updated")
+
+
+@router.delete("/candidates/notes/{note_id}")
+async def delete_candidate_note(
+    note_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_admin),
+) -> dict:
+    note = await JobCandidateNoteCRUD.get_by_id(db, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="note not found")
+    await JobCandidateNoteCRUD.soft_delete(db, note)
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect_company_job_candidate_note",
+        entity_id=note_id,
+        action="delete",
+    )
+    return ok(message="note deleted")

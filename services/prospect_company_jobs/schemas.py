@@ -24,6 +24,7 @@ class JobCreate(BaseModel):
     source_external_id: Optional[str] = None
     jd_url: Optional[str] = None
     posting_url: Optional[str] = Field(default=None, max_length=500)
+    expectation_target: Optional[int] = Field(default=None, ge=1, le=9999)
     notes: Optional[str] = None
 
 
@@ -155,5 +156,25 @@ class CandidateOut(BaseModel):
     decided_at: Optional[datetime]
     decision_notes: Optional[str]
     prepared_by_user_id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+# ----------------------------- candidate notes (append-only)
+
+class CandidateNoteCreate(BaseModel):
+    body: str = Field(min_length=1)
+
+
+class CandidateNoteUpdate(BaseModel):
+    body: str = Field(min_length=1)
+
+
+class CandidateNoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    candidate_id: int
+    body: str
+    created_by_user_id: int
     created_at: datetime
     updated_at: datetime

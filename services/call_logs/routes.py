@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.crud import AdminUserCRUD
 from services.admin_users.deps import (
+    current_user,
     require_admin,
     require_caller,
     require_dashboard_read,
@@ -82,6 +83,34 @@ async def list_callbacks_for(
     return ok([_serialize(c) for c in rows])
 
 
+@router.get("/demos")
+async def list_my_demos(
+    upcoming_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_caller),
+) -> dict:
+    """Caller's own scheduled demos — outcome=demo_scheduled (4) with a
+    callback_at time set. Powers the Sales Dashboard "Upcoming Demos" panel."""
+    rows = await CallLogCRUD.list_calls_by_outcome_for_caller(
+        db, user.id, outcome=4, upcoming_only=upcoming_only
+    )
+    return ok([_serialize(c) for c in rows])
+
+
+@router.get("/demos/{caller_user_id}")
+async def list_demos_for(
+    caller_user_id: int,
+    upcoming_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_admin),
+) -> dict:
+    """Admin-only — view another caller's scheduled demos."""
+    rows = await CallLogCRUD.list_calls_by_outcome_for_caller(
+        db, caller_user_id, outcome=4, upcoming_only=upcoming_only
+    )
+    return ok([_serialize(c) for c in rows])
+
+
 # --- daily aggregates (Sales Dashboard / Prospects chips) -----------------
 
 # CALL_OUTCOMES §6.26 keys, in canonical order. Every response always reports
@@ -111,7 +140,10 @@ async def daily_stats(
     date: Optional[date_t] = None,
     owner_user_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(require_dashboard_read),
+    # Auth-only: callers (role 4) need access to their *own* daily-stats
+    # for the "Next Prospect" view — the per-user check below already
+    # blocks cross-rep snooping for non-admins (BUG-016).
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     """
     Per-caller daily call counters (powers Sales Dashboard KPI strip +
@@ -166,7 +198,9 @@ async def call_queue(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(require_dashboard_read),
+    # Auth-only: same reasoning as /daily-stats — caller must read their
+    # own queue (BUG-016). Per-user check below covers non-admin scoping.
+    user: AdminUser = Depends(current_user),
 ) -> dict:
     """
     Caller's eligible call queue (Schema doc §5.5 ordering — never-touched
@@ -234,7 +268,7 @@ async def skip_prospect(
     return ok({"prospect_id": payload.prospect_id}, message="skipped")
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def record_call(
     payload: CallLogCreate,
     db: AsyncSession = Depends(get_db),

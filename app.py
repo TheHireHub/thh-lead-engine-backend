@@ -117,6 +117,10 @@ app = FastAPI(
     docs_url=None if IS_PROD and os.getenv("EXPOSE_DOCS", "false").lower() != "true" else "/docs",
     redoc_url=None if IS_PROD and os.getenv("EXPOSE_DOCS", "false").lower() != "true" else "/redoc",
     openapi_url=None if IS_PROD and os.getenv("EXPOSE_DOCS", "false").lower() != "true" else "/openapi.json",
+    # No silent 307 between with/without trailing slash. Either the route
+    # matches exactly (and returns 200) or it 404s — much easier to debug
+    # than a redirect loop bouncing between Next.js and FastAPI (BUG-020).
+    redirect_slashes=False,
 )
 
 
