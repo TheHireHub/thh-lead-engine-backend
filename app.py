@@ -149,6 +149,36 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# Trailing-slash compat — FastAPI auto-redirects `/api/prospects` to
+# `/api/prospects/` (307). The Next.js proxy is configured with
+# `trailingSlash: false`, which 308-redirects the slashed form back, causing
+# an infinite loop. Resolve internally: when FastAPI would 307 for trailing-
+# slash mismatch, mutate request.scope and re-route so a single response is
+# returned, no redirect ever leaves the backend.
+# ---------------------------------------------------------------------------
+from urllib.parse import urlparse
+
+
+@app.middleware("http")
+async def trailing_slash_compat(request, call_next):
+    response = await call_next(request)
+    if response.status_code != 307:
+        return response
+    loc = response.headers.get("location") or ""
+    if not loc:
+        return response
+    target_path = urlparse(loc).path
+    if not target_path:
+        return response
+    # Only handle the trailing-slash case (paths differ only by a trailing /).
+    if target_path.rstrip("/") != request.url.path.rstrip("/"):
+        return response
+    request.scope["path"] = target_path
+    request.scope["raw_path"] = target_path.encode("ascii")
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 @app.get("/health", tags=["meta"])
