@@ -44,7 +44,8 @@ def _headers() -> dict[str, str]:
     }
     token = os.getenv("THH_BACKEND_SERVICE_TOKEN")
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        # SCHEMA §9 — thh-backend lead-engine routes auth via X-Service-Token.
+        headers["X-Service-Token"] = token
     return headers
 
 
@@ -123,9 +124,10 @@ async def send_otp(*, email: str, purpose: str = "lead_engine_signup") -> dict:
 # ---------------------------------------------------------------------------
 # §9.4 Verify OTP                                                [Dev B uses]
 # ---------------------------------------------------------------------------
-async def verify_otp(*, email: str, otp_code: str) -> dict:
+async def verify_otp(*, email: str, otp_code: str, purpose: str = "lead_engine_signup") -> dict:
     return await _post(
-        "/api/auth/login-otp/verify", json_body={"email": email, "otp_code": otp_code}
+        "/api/auth/login-otp/verify",
+        json_body={"email": email, "otp_code": otp_code, "purpose": purpose},
     )
 
 

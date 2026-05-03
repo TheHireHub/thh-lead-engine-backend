@@ -55,6 +55,10 @@ def _validate_env() -> None:
         "MYSQL_PASSWORD",
         "CORS_ALLOWED_ORIGINS",
         "SESSION_COOKIE_SECURE",
+        # SCHEMA §9 — required to talk to thh-backend.
+        "THH_BACKEND_SERVICE_TOKEN",
+        # SCHEMA §7.18 — required to validate Calendly webhook signatures.
+        "CALENDLY_WEBHOOK_SIGNING_KEY",
     ]
     bad: list[str] = []
     for key in required:
@@ -142,6 +146,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Trailing-slash compat — FastAPI auto-redirects `/api/prospects` to
+# `/api/prospects/` (307). The Next.js proxy is configured with
+# `trailingSlash: false`, which 308-redirects the slashed form back, causing
+# an infinite loop. Resolve internally: when FastAPI would 307 for trailing-
+# slash mismatch, mutate request.scope and re-route so a single response is
+# returned, no redirect ever leaves the backend.
+# ---------------------------------------------------------------------------
+from urllib.parse import urlparse
+
+
+@app.middleware("http")
+async def trailing_slash_compat(request, call_next):
+    response = await call_next(request)
+    if response.status_code != 307:
+        return response
+    loc = response.headers.get("location") or ""
+    if not loc:
+        return response
+    target_path = urlparse(loc).path
+    if not target_path:
+        return response
+    # Only handle the trailing-slash case (paths differ only by a trailing /).
+    if target_path.rstrip("/") != request.url.path.rstrip("/"):
+        return response
+    request.scope["path"] = target_path
+    request.scope["raw_path"] = target_path.encode("ascii")
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
