@@ -564,6 +564,17 @@ async def promote_to_thh(
 
     prospect = await ProspectCRUD.set_thh_user_id(db, prospect, thh_user_id)
 
+    # SCHEMA §3: Promote-to-THH must flip stage→converted (also sets
+    # converted_at milestone via change_stage).
+    if prospect.stage != 2:
+        prospect = await ProspectCRUD.change_stage(
+            db,
+            prospect,
+            to_stage=2,  # §6.2 converted
+            reason="promote_to_thh",
+            changed_by_user_id=user.id,
+        )
+
     await AuditLogCRUD.record(
         db,
         actor_user_id=user.id,
