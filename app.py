@@ -55,6 +55,10 @@ def _validate_env() -> None:
         "MYSQL_PASSWORD",
         "CORS_ALLOWED_ORIGINS",
         "SESSION_COOKIE_SECURE",
+        # SCHEMA §9 — required to talk to thh-backend.
+        "THH_BACKEND_SERVICE_TOKEN",
+        # SCHEMA §7.18 — required to validate Calendly webhook signatures.
+        "CALENDLY_WEBHOOK_SIGNING_KEY",
     ]
     bad: list[str] = []
     for key in required:
