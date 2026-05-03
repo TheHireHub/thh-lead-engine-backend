@@ -556,18 +556,20 @@ async def promote_to_thh(
             detail=f"thh-backend promote failed: {exc}",
         )
 
-    thh_user_id = resp.get("users.id") or resp.get("user_id") or resp.get("id")
+    # SCHEMA §9.1: HH-BE wraps response in {success, data: {users_id, ...}}.
+    body = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+    thh_user_id = body.get("users_id") or body.get("user_id") or body.get("id")
     if not thh_user_id:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="thh-backend did not return users.id",
+            detail="thh-backend did not return users_id",
         )
     try:
         thh_user_id = int(thh_user_id)
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="thh-backend returned invalid users.id",
+            detail="thh-backend returned invalid users_id",
         )
 
     prospect = await ProspectCRUD.set_thh_user_id(db, prospect, thh_user_id)
