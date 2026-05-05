@@ -176,8 +176,13 @@ class CallLogCRUD:
     async def calls_today_count(
         db: AsyncSession, *, caller_user_id: int, day: date
     ) -> int:
-        """COUNT(*) of call_logs by this caller on `day`."""
-        stmt = select(func.count(CallLog.id)).where(
+        """
+        Count UNIQUE prospects this caller dialled on `day` (not raw
+        call_log rows). Logging the same prospect twice in a day still
+        counts as one against the daily target, so reps can't pad their
+        number by re-logging the same lead.
+        """
+        stmt = select(func.count(func.distinct(CallLog.prospect_id))).where(
             CallLog.caller_user_id == caller_user_id,
             func.date(CallLog.called_at) == day,
         )
