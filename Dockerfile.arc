@@ -24,4 +24,7 @@ RUN mkdir -p /app/logs && chown -R appuser:appuser /app
 
 USER appuser
 
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD pgrep -f "arq workers.settings.WorkerSettings" > /dev/null || exit 1
+
 ENTRYPOINT ["arq", "workers.settings.WorkerSettings"]
