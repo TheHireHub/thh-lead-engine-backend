@@ -25,6 +25,6 @@ RUN mkdir -p /app/logs && chown -R appuser:appuser /app
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD pgrep -f "arq workers.settings.WorkerSettings" > /dev/null || exit 1
+    CMD python -c "import os,sys; sys.exit(0 if 'arq' in open('/proc/1/cmdline','rb').read().decode('utf-8','ignore') else 1)" || exit 1
 
 ENTRYPOINT ["arq", "workers.settings.WorkerSettings"]
