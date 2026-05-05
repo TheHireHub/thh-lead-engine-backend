@@ -126,6 +126,7 @@ def _stage_serialize(prospect: Prospect) -> dict:
         "name": name,
         "title": prospect.title,
         "company_id": prospect.company_id,
+        "owner_user_id": prospect.owner_user_id,
         "phone": prospect.phone,
         "email": prospect.email,
         "stage": prospect.stage,
