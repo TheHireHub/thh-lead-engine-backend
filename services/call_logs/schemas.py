@@ -29,6 +29,9 @@ class CallLogOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     prospect_id: int
+    prospect_name: Optional[str] = None
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
     caller_user_id: int
     outcome: int
     outcome_label: Optional[str] = None
@@ -78,11 +81,14 @@ class QueueRow(BaseModel):
     name: Optional[str]
     title: Optional[str]
     company_id: Optional[int]
+    company_name: Optional[str] = None
     owner_user_id: Optional[int] = None
     phone: Optional[str]
     email: Optional[str]
     stage: int
     stage_label: Optional[str] = None
+    last_outcome: Optional[int] = None
+    last_outcome_label: Optional[str] = None
     last_touched_at: Optional[datetime]
     rnr_count: int
 
