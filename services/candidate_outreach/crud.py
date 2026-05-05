@@ -82,11 +82,29 @@ class CandidateOutreachCRUD:
         return None
 
     @staticmethod
+    def _normalise_to_utc_naive(dt: datetime) -> datetime:
+        """Coerce inbound `initiated_at` to UTC, stored as a naive value.
+
+        MySQL `DATETIME` carries no tz, so we fix the convention at the
+        boundary: the column always means "UTC". A tz-aware payload is
+        converted; a naive payload is *assumed* UTC (defensible: HH-BE's
+        contract is to send UTC, and this matches `created_at`'s server
+        default `CURRENT_TIMESTAMP` which MySQL writes in session tz —
+        kept UTC by setting `time_zone='+00:00'` on the connection).
+        """
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    @staticmethod
     def _build_dedup_key(payload) -> str:
         """Synthesise a dedup key when HH-BE didn't supply one. Format:
         `{job_id}:{user_id|0}:{epoch_seconds}` — stable across retries
         for the same click."""
-        epoch = int(payload.initiated_at.timestamp())
+        dt = payload.initiated_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        epoch = int(dt.timestamp())
         actor = payload.initiated_by.thh_user_id or 0
         return f"{payload.thh_job_id}:{actor}:{epoch}"
 
@@ -129,7 +147,9 @@ class CandidateOutreachCRUD:
             initiated_by_thh_user_id=payload.initiated_by.thh_user_id,
             initiated_by_email=payload.initiated_by.email,
             initiated_by_name=payload.initiated_by.name,
-            initiated_at=payload.initiated_at,
+            initiated_at=CandidateOutreachCRUD._normalise_to_utc_naive(
+                payload.initiated_at
+            ),
             channel=payload.channel,
             candidate_count=len(payload.candidates),
             status=0,  # initiated

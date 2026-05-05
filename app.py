@@ -57,6 +57,9 @@ def _validate_env() -> None:
         "SESSION_COOKIE_SECURE",
         # SCHEMA §9 — required to talk to thh-backend.
         "THH_BACKEND_SERVICE_TOKEN",
+        # SCHEMA §9.6 — inbound auth for the Initiate Outreach webhook;
+        # without it, HH-BE pushes get 503'd at the gate.
+        "THH_INCOMING_SERVICE_TOKEN",
         # SCHEMA §7.18 — required to validate Calendly webhook signatures.
         "CALENDLY_WEBHOOK_SIGNING_KEY",
     ]
