@@ -85,6 +85,7 @@ from services.admin_users.routes import router as admin_users_router
 from services.audit.routes import router as audit_router
 from services.call_logs.routes import router as call_logs_router
 from services.campaigns.routes import router as campaigns_router
+from services.candidate_outreach.routes import router as candidate_outreach_router
 from services.companies.routes import router as companies_router
 from services.email_replies.routes import router as email_replies_router
 from services.funnel_snapshots.routes import router as funnel_snapshots_router
@@ -217,6 +218,7 @@ app.include_router(unsubscribes_router)
 app.include_router(prospect_notes_router)
 app.include_router(prospect_jobs_router)
 app.include_router(call_logs_router)
+app.include_router(candidate_outreach_router)
 app.include_router(funnel_snapshots_router)
 app.include_router(audit_router)
 app.include_router(webhooks_router)
