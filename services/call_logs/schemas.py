@@ -78,6 +78,7 @@ class QueueRow(BaseModel):
     name: Optional[str]
     title: Optional[str]
     company_id: Optional[int]
+    owner_user_id: Optional[int] = None
     phone: Optional[str]
     email: Optional[str]
     stage: int
