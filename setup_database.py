@@ -67,6 +67,7 @@ def import_all_models() -> None:
     from services.admin_users import models as _admin_users  # noqa: F401
     from services.audit import models as _audit  # noqa: F401
     from services.call_logs import models as _call_logs  # noqa: F401
+    from services.candidate_outreach import models as _candidate_outreach  # noqa: F401
     from services.campaigns import models as _campaigns  # noqa: F401
     from services.companies import models as _companies  # noqa: F401
     from services.email_replies import models as _email_replies  # noqa: F401
