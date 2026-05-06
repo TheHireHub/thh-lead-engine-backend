@@ -154,8 +154,37 @@ async def create_user(
     db: AsyncSession = Depends(get_db),
     actor: AdminUser = Depends(require_admin),
 ) -> dict:
-    if await AdminUserCRUD.get_by_email(db, payload.email):
+    # The unique index on `admin_users.email` ignores `deleted_at` (MySQL
+    # doesn't do partial unique indexes), so a previously-soft-deleted row
+    # with the same email blocks a fresh INSERT and crashes the route with
+    # a generic 500. Detect that case and restore the row instead — same
+    # id, same audit chain, password / name / role rewritten to the new
+    # payload values. Net effect from the admin's perspective: "create
+    # works on a previously-deleted email".
+    existing = await AdminUserCRUD.get_by_email_any(db, payload.email)
+    if existing is not None and existing.deleted_at is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already in use")
+    if existing is not None and existing.deleted_at is not None:
+        existing.deleted_at = None
+        existing.password_hash = hash_password(payload.password)
+        existing.first_name = payload.first_name
+        existing.last_name = payload.last_name
+        existing.role = payload.role
+        existing.daily_call_target = payload.daily_call_target
+        existing.avatar_color = payload.avatar_color
+        existing.last_login_at = None
+        await db.commit()
+        await db.refresh(existing)
+        await AuditLogCRUD.record(
+            db,
+            actor_user_id=actor.id,
+            entity_type="admin_user",
+            entity_id=existing.id,
+            action="restore",
+            after_json={"email": existing.email, "role": existing.role},
+            ip_address=request.client.host if request.client else None,
+        )
+        return ok(_serialize(existing), message="admin user restored")
 
     user = await AdminUserCRUD.create(
         db,

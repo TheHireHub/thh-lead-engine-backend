@@ -32,6 +32,14 @@ class AdminUserCRUD:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_by_email_any(db: AsyncSession, email: str) -> Optional[AdminUser]:
+        """Find a user by email regardless of soft-delete state. Used by the
+        create route to detect that the unique email belongs to a previously
+        deleted account so we can restore it instead of crashing on INSERT."""
+        result = await db.execute(select(AdminUser).where(AdminUser.email == email))
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def list_all(db: AsyncSession, role: Optional[int] = None) -> list[AdminUser]:
         stmt = select(AdminUser).where(AdminUser.deleted_at.is_(None))
         if role is not None:
