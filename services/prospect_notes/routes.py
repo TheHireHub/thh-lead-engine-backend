@@ -9,6 +9,7 @@ from database_connection.connection import get_db
 from services.admin_users.deps import (
     require_admin,
     require_internal,
+    require_internal_or_caller,
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
@@ -34,7 +35,7 @@ async def list_notes(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     rows = await ProspectNoteCRUD.list_recent(
         db, prospect_id=prospect_id, status=status, limit=limit, offset=offset
@@ -46,7 +47,7 @@ async def list_notes(
 async def list_for_prospect(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_internal),
+    _user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     rows = await ProspectNoteCRUD.list_for_prospect(db, prospect_id)
     return ok([_serialize(n) for n in rows])

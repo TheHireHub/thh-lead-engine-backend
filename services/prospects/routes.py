@@ -238,7 +238,7 @@ async def decide_merge(
 async def get_prospect(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     """Detail response carries the same `latest_call_*` enrichment as the list."""
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
@@ -258,7 +258,7 @@ async def get_timeline(
     prospect_id: int,
     limit: int = 200,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     """
     Unified activity timeline for one prospect (FE Prospect Detail
@@ -367,16 +367,36 @@ async def get_timeline(
 
     # Descending merge — None timestamps last.
     items.sort(key=lambda i: (i["ts"] is None, i["ts"]), reverse=True)
-    return ok(items[:limit])
+    items = items[:limit]
+
+    # Resolve actor display names in one batch so the FE timeline can show
+    # "by Ishank Sharma" instead of "by #1". Soft-deleted users are kept on
+    # historical rows on purpose (services/admin_users/crud.py:44-68).
+    user_ids: set[int] = set()
+    for it in items:
+        if it["type"] == "audit" and it.get("actor_user_id") is not None:
+            user_ids.add(it["actor_user_id"])
+        if it["type"] == "call" and it.get("caller_user_id") is not None:
+            user_ids.add(it["caller_user_id"])
+    if user_ids:
+        names = await AdminUserCRUD.names_by_ids(db, list(user_ids))
+        for it in items:
+            if it["type"] == "audit":
+                it["actor_name"] = names.get(it.get("actor_user_id"))
+            elif it["type"] == "call":
+                it["caller_name"] = names.get(it.get("caller_user_id"))
+    return ok(items)
 
 
 @router.get("/{prospect_id}/stage-history")
 async def get_stage_history(
     prospect_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    _user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     rows = await ProspectCRUD.list_stage_history(db, prospect_id)
+    user_ids = {r.changed_by_user_id for r in rows if r.changed_by_user_id is not None}
+    names = await AdminUserCRUD.names_by_ids(db, list(user_ids)) if user_ids else {}
     return ok(
         [
             {
@@ -387,6 +407,7 @@ async def get_stage_history(
                 "to_stage_label": get_label(FUNNEL_STAGES, r.to_stage),
                 "reason": r.reason,
                 "changed_by_user_id": r.changed_by_user_id,
+                "changed_by_name": names.get(r.changed_by_user_id),
                 "changed_at": r.changed_at.isoformat() if r.changed_at else None,
             }
             for r in rows
@@ -478,7 +499,7 @@ async def change_stage(
     payload: StageChange,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(require_growth_or_bdr),
+    user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
