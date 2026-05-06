@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
@@ -654,3 +654,180 @@ async def delete_prospect(
         ip_address=request.client.host if request.client else None,
     )
     return ok(message="prospect deleted")
+
+
+# Bulk CSV import (Apollo-export shape — see services/integrations/apollo.py
+# for the live API path). Admin or caller drops a file in the FE "Import
+# CSV" panel; we parse, dedupe per row via Arch-6 (`find_existing`), create
+# any missing companies (matched case-insensitively by name), and report
+# {created, skipped, errors}. Caller-imported leads auto-assign owner+
+# created_by to the caller (same rule as the manual create_prospect path).
+_CSV_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "first_name": ("First Name", "first_name"),
+    "last_name": ("Last Name", "last_name"),
+    "title": ("Title", "Job Title", "title"),
+    "company_name": ("Company", "Company Name", "company"),
+    "email": ("Email", "email"),
+    "linkedin_url": ("Person Linkedin Url", "Person LinkedIn Url", "LinkedIn Url", "linkedin_url"),
+    "phone": (
+        "Work Direct Phone",
+        "Work Phone",
+        "Mobile Phone",
+        "Corporate Phone",
+        "Other Phone",
+        "Home Phone",
+        "phone",
+    ),
+}
+
+
+def _pick(row: dict, key: str) -> str:
+    for col in _CSV_COLUMN_ALIASES[key]:
+        v = row.get(col)
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            return v
+    return ""
+
+
+@router.post("/import-csv")
+async def import_csv(
+    file: UploadFile | None = File(default=None),
+    url: str | None = Form(default=None),
+    source_channel: int = Form(9),  # default = apollo (CHANNELS §6.3)
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_internal_or_caller),
+) -> dict:
+    import csv as _csv
+    import io
+
+    import httpx
+
+    from services.companies.crud import CompanyCRUD
+    from services.prospects.dedupe import find_existing
+
+    # Either a multipart-uploaded file or a public URL pointing at a CSV
+    # (Google Sheets export / S3 / raw GitHub link). URL fetch is a 10s
+    # timeout — long enough for an Apollo "View as CSV" download but not
+    # long enough to hang the request indefinitely on a misconfigured host.
+    if file is not None and getattr(file, "filename", None):
+        raw_bytes = await file.read()
+    elif url:
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="url must be http(s)",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                raw_bytes = r.content
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"could not fetch CSV from url: {exc}",
+            ) from exc
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="provide either `file` or `url`",
+        )
+
+    raw = raw_bytes.decode("utf-8-sig", errors="replace")
+    reader = _csv.DictReader(io.StringIO(raw))
+
+    created = 0
+    skipped = 0
+    errors: list[dict] = []
+    last_idx = 1
+
+    for idx, row in enumerate(reader, start=2):  # row 1 = header
+        last_idx = idx
+        try:
+            first_name = _pick(row, "first_name")
+            last_name = _pick(row, "last_name") or None
+            title = _pick(row, "title") or None
+            company_name = _pick(row, "company_name")
+            email = (_pick(row, "email") or "").lower() or None
+            linkedin_url = _pick(row, "linkedin_url") or None
+            phone = _pick(row, "phone") or None
+
+            if not first_name:
+                errors.append({"row": idx, "reason": "missing first_name"})
+                continue
+            if not (email or phone or linkedin_url):
+                errors.append({"row": idx, "reason": "no email/phone/linkedin"})
+                continue
+
+            existing = await find_existing(
+                db, linkedin_url=linkedin_url, email=email, phone=phone
+            )
+            if existing:
+                skipped += 1
+                continue
+
+            company_id: int | None = None
+            if company_name:
+                # Case-insensitive lookup by name (no domain in Apollo
+                # contact export). q= does an ilike match on name+domain;
+                # we narrow to exact-equal-lower so "Yulu" doesn't catch
+                # "Yulu Bikes" by accident.
+                candidates = await CompanyCRUD.list_all(db, q=company_name, limit=10)
+                target = company_name.strip().lower()
+                match = next(
+                    (c for c in candidates if (c.name or "").strip().lower() == target),
+                    None,
+                )
+                if match:
+                    company_id = match.id
+                else:
+                    new_co = await CompanyCRUD.create(
+                        db,
+                        name=company_name,
+                        source=1,  # CompanySource §6.4 — manual
+                    )
+                    company_id = new_co.id
+
+            await ProspectCRUD.create(
+                db,
+                first_name=first_name,
+                last_name=last_name,
+                title=title,
+                company_id=company_id,
+                email=email,
+                phone=phone,
+                linkedin_url=linkedin_url,
+                source_channel=source_channel,
+                stage=0,
+                created_by_user_id=user.id,
+                # Caller imports auto-route to themselves so the new leads
+                # land in their own /sales queue immediately.
+                owner_user_id=user.id if user.role == ROLE_CALLER else None,
+            )
+            created += 1
+        except Exception as exc:
+            errors.append({"row": idx, "reason": str(exc)[:200]})
+            await db.rollback()
+
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect",
+        entity_id=0,
+        action="import_csv",
+        after_json={"created": created, "skipped": skipped, "error_count": len(errors)},
+    )
+
+    return ok(
+        {
+            "created": created,
+            "skipped": skipped,
+            "errors": errors[:50],  # cap so we don't ship 5000 dupes' rows back
+            "error_count": len(errors),
+            "total_rows": max(0, last_idx - 1),
+        },
+        message=f"imported {created} leads ({skipped} duplicates, {len(errors)} errors)",
+    )
