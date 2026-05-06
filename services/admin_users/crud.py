@@ -46,13 +46,19 @@ class AdminUserCRUD:
         Batch-resolve admin user IDs to display names. Used by list endpoints
         that need to project an `owner_name` column without an N+1 (BUG-008).
         Returns `{id: "First Last"}` (last name omitted if NULL/empty).
-        Soft-deleted users are excluded.
+
+        Soft-deleted users ARE included on purpose: historical call_logs,
+        audit rows, and closed-deal ownership rows still need a label after
+        the rep churns out (industry-standard "deactivated user still shows
+        on past records" behaviour). Login + active rosters separately
+        filter `deleted_at IS NULL` via `get_by_email` and `list_all`, so
+        leaving them in the name lookup doesn't reopen any auth hole.
         """
         if not ids:
             return {}
         result = await db.execute(
             select(AdminUser.id, AdminUser.first_name, AdminUser.last_name).where(
-                AdminUser.id.in_(set(ids)), AdminUser.deleted_at.is_(None)
+                AdminUser.id.in_(set(ids))
             )
         )
         out: dict[int, str] = {}
