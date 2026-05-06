@@ -16,7 +16,7 @@ The Caller "Next prospect" workflow (§5.5) lives here too:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import func, or_, select
@@ -151,22 +151,15 @@ class CallLogCRUD:
         Pick the next prospect this caller should call.
 
         Rules (Schema doc §5.5):
-        - Owned by this caller (prospects.owner_user_id == caller_user_id).
+        - Owned by this caller (prospects.owner_user_id == caller_user_id) OR
+          created by this caller.
         - Not deleted.
         - Stage NOT IN (converted, lost, unsubscribed).
-        - No RNR call_log within the last 24h (cool-off after a no-response).
         - Sort by last_touched_at ascending NULLs first (never-touched prospects
-          surface before stale ones).
+          surface before stale ones). Recently-RNR'd leads sort last because
+          their last_touched_at just got bumped, so they naturally fall to the
+          bottom — but they STAY visible (caller decides whether to retry).
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-
-        # Subquery: prospect_ids with an RNR in the last 24h.
-        recent_rnr = (
-            select(CallLog.prospect_id)
-            .where(CallLog.outcome == 0, CallLog.called_at >= cutoff)
-            .scalar_subquery()
-        )
-
         # MySQL doesn't support NULLS FIRST — emulate with two-level sort:
         # rows where last_touched_at IS NULL come first, then by ASC.
         # Caller scope: assigned-to-me OR added-by-me (§5.5 BDR isolation).
@@ -179,7 +172,6 @@ class CallLogCRUD:
                 ),
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
-                Prospect.id.not_in(recent_rnr),
             )
             .order_by(
                 Prospect.last_touched_at.is_(None).desc(),
@@ -349,12 +341,6 @@ class CallLogCRUD:
         now. Same eligibility filter as `next_prospect_for_caller` but
         returning a count instead of one row.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        recent_rnr = (
-            select(CallLog.prospect_id)
-            .where(CallLog.outcome == 0, CallLog.called_at >= cutoff)
-            .scalar_subquery()
-        )
         stmt = select(func.count(Prospect.id)).where(
             or_(
                 Prospect.owner_user_id == caller_user_id,
@@ -362,7 +348,6 @@ class CallLogCRUD:
             ),
             Prospect.deleted_at.is_(None),
             Prospect.stage.not_in(EXCLUDED_STAGES),
-            Prospect.id.not_in(recent_rnr),
         )
         result = await db.execute(stmt)
         return int(result.scalar_one() or 0)
@@ -380,12 +365,6 @@ class CallLogCRUD:
         `next_prospect_for_caller` picks: never-touched first (NULL
         last_touched_at), then oldest touched.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        recent_rnr = (
-            select(CallLog.prospect_id)
-            .where(CallLog.outcome == 0, CallLog.called_at >= cutoff)
-            .scalar_subquery()
-        )
         stmt = (
             select(Prospect)
             .where(
@@ -395,7 +374,6 @@ class CallLogCRUD:
                 ),
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
-                Prospect.id.not_in(recent_rnr),
             )
             .order_by(
                 Prospect.last_touched_at.is_(None).desc(),
@@ -413,16 +391,9 @@ class CallLogCRUD:
 
     @staticmethod
     async def queue_size_all(db: AsyncSession) -> int:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        recent_rnr = (
-            select(CallLog.prospect_id)
-            .where(CallLog.outcome == 0, CallLog.called_at >= cutoff)
-            .scalar_subquery()
-        )
         stmt = select(func.count(Prospect.id)).where(
             Prospect.deleted_at.is_(None),
             Prospect.stage.not_in(EXCLUDED_STAGES),
-            Prospect.id.not_in(recent_rnr),
         )
         result = await db.execute(stmt)
         return int(result.scalar_one() or 0)
@@ -431,18 +402,11 @@ class CallLogCRUD:
     async def queue_all(
         db: AsyncSession, *, limit: int = 100, offset: int = 0
     ) -> list[Prospect]:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        recent_rnr = (
-            select(CallLog.prospect_id)
-            .where(CallLog.outcome == 0, CallLog.called_at >= cutoff)
-            .scalar_subquery()
-        )
         stmt = (
             select(Prospect)
             .where(
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
-                Prospect.id.not_in(recent_rnr),
             )
             .order_by(
                 Prospect.last_touched_at.is_(None).desc(),
