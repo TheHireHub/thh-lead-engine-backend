@@ -27,6 +27,13 @@ class ProspectUpdate(BaseModel):
     company_id: Optional[int] = None
     owner_user_id: Optional[int] = None
     quality_score: Optional[int] = Field(default=None, ge=0, le=10)
+    # Identifier edits — route runs Arch-6 v2 dedupe (linkedin OR email)
+    # against OTHER prospects before applying, so editing can't merge two
+    # distinct people into one row by accident.
+    linkedin_url: Optional[str] = Field(default=None, max_length=500)
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field(default=None, max_length=30)
+    source_channel: Optional[int] = Field(default=None, ge=0, le=12)
 
 
 class ProspectOut(BaseModel):

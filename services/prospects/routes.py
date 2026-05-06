@@ -474,8 +474,33 @@ async def update_prospect(
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="prospect not found")
+
+    # Arch-6 v2 dedupe on identifier edits — if the new linkedin_url or
+    # email already belongs to a DIFFERENT prospect, refuse the edit
+    # (otherwise the user would unknowingly create two rows pointing at
+    # the same person, then we'd silently lose history when one of them
+    # was later deleted). Phone is excluded for the same reason as the
+    # CSV import: corporate switchboards are shared.
+    fields_in = payload.model_dump(exclude_unset=True)
+    new_linkedin = fields_in.get("linkedin_url")
+    new_email = fields_in.get("email")
+    if new_linkedin or new_email:
+        clash = await find_existing(
+            db,
+            linkedin_url=new_linkedin if new_linkedin and new_linkedin != prospect.linkedin_url else None,
+            email=new_email if new_email and new_email != prospect.email else None,
+        )
+        if clash and clash.id != prospect.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "another lead already uses this LinkedIn or email",
+                    "id": clash.id,
+                },
+            )
+
     before = _audit_payload(prospect)
-    prospect = await ProspectCRUD.update(db, prospect, **payload.model_dump(exclude_unset=True))
+    prospect = await ProspectCRUD.update(db, prospect, **fields_in)
 
     # Recompute quality if title/company changed.
     score = await _quality_for_prospect(db, prospect)
