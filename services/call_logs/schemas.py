@@ -97,6 +97,11 @@ class QueueRow(BaseModel):
     last_outcome: Optional[int] = None
     last_outcome_label: Optional[str] = None
     last_touched_at: Optional[datetime]
+    # Latest call_log.callback_at, only populated when the most recent call
+    # is still an open call_back / demo_scheduled. Drives the "Follow-up
+    # Time" column. Null when the rep hasn't set one — FE renders "—" in
+    # that case (no overdue chip).
+    next_callback_at: Optional[datetime] = None
     rnr_count: int
 
 

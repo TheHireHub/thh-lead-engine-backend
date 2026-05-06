@@ -54,8 +54,14 @@ async def _company_name_map(db: AsyncSession, company_ids: list[int]) -> dict[in
 
 async def _latest_outcome_map(
     db: AsyncSession, prospect_ids: list[int]
-) -> dict[int, int]:
-    """For each prospect, return the outcome of the most recent call_log row."""
+) -> dict[int, tuple[int, Optional[datetime]]]:
+    """For each prospect, return `(latest_outcome, latest_callback_at)`.
+
+    `callback_at` is only carried when the latest outcome is an open state
+    (`2` call_back or `4` demo_scheduled) — for everything else we return
+    None so the queue's "Follow-up Time" column renders "—" instead of
+    falsely marking `last_touched_at` as overdue.
+    """
     if not prospect_ids:
         return {}
     latest_at = (
@@ -68,7 +74,7 @@ async def _latest_outcome_map(
         .subquery()
     )
     stmt = (
-        select(CallLog.prospect_id, CallLog.outcome)
+        select(CallLog.prospect_id, CallLog.outcome, CallLog.callback_at)
         .join(
             latest_at,
             (CallLog.prospect_id == latest_at.c.pid)
@@ -76,7 +82,12 @@ async def _latest_outcome_map(
         )
     )
     result = await db.execute(stmt)
-    return {int(pid): int(outcome) for pid, outcome in result.all()}
+    out: dict[int, tuple[int, Optional[datetime]]] = {}
+    for pid, outcome, callback_at in result.all():
+        o = int(outcome)
+        cb = callback_at if o in (2, 4) else None
+        out[int(pid)] = (o, cb)
+    return out
 
 
 async def _prospect_lookup_map(
@@ -211,6 +222,7 @@ def _stage_serialize(
     *,
     company_name: Optional[str] = None,
     last_outcome: Optional[int] = None,
+    next_callback_at: Optional[datetime] = None,
 ) -> dict:
     name = " ".join(p for p in [prospect.first_name, prospect.last_name] if p) or None
     return {
@@ -227,6 +239,7 @@ def _stage_serialize(
         "last_outcome": last_outcome,
         "last_outcome_label": get_label(CALL_OUTCOMES, last_outcome) if last_outcome is not None else None,
         "last_touched_at": prospect.last_touched_at,
+        "next_callback_at": next_callback_at,
         "rnr_count": prospect.rnr_count,
     }
 
@@ -377,7 +390,8 @@ async def call_queue(
             QueueRow(**_stage_serialize(
                 p,
                 company_name=company_map.get(p.company_id) if p.company_id else None,
-                last_outcome=outcome_map.get(p.id),
+                last_outcome=(outcome_map.get(p.id) or (None, None))[0],
+                next_callback_at=(outcome_map.get(p.id) or (None, None))[1],
             ))
             for p in rows
         ],
