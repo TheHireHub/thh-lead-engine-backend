@@ -85,7 +85,13 @@ class CallLogCRUD:
                     and_(
                         cl2.c.prospect_id == CallLog.prospect_id,
                         cl2.c.outcome.in_(superseding),
-                        cl2.c.called_at > CallLog.called_at,
+                        or_(
+                            cl2.c.called_at > CallLog.called_at,
+                            and_(
+                                cl2.c.called_at == CallLog.called_at,
+                                cl2.c.id > CallLog.id,
+                            ),
+                        ),
                     )
                 ).exists()
             )
@@ -277,28 +283,31 @@ class CallLogCRUD:
         # rep's earlier open-state row for that prospect is consumed. Mirrors
         # the same org-wide rule used by `list_calls_by_outcome_for_caller`.
         cl2 = CallLog.__table__.alias("cl2")
-        demo_superseded = (
-            select(cl2.c.id)
-            .where(
-                and_(
-                    cl2.c.prospect_id == CallLog.prospect_id,
-                    cl2.c.outcome.in_((5, 6)),
-                    cl2.c.called_at > CallLog.called_at,
+        # MySQL DATETIME(0) has 1-second resolution, so two outcomes logged
+        # in the same second tie on `called_at` and a strict `>` would miss
+        # the supersession (e.g. caller logs demo_scheduled then attended
+        # within ~250ms — same second). Tie-break on `id` (monotonic).
+        def _is_later(outcomes: tuple[int, ...]):
+            return (
+                select(cl2.c.id)
+                .where(
+                    and_(
+                        cl2.c.prospect_id == CallLog.prospect_id,
+                        cl2.c.outcome.in_(outcomes),
+                        or_(
+                            cl2.c.called_at > CallLog.called_at,
+                            and_(
+                                cl2.c.called_at == CallLog.called_at,
+                                cl2.c.id > CallLog.id,
+                            ),
+                        ),
+                    )
                 )
+                .exists()
             )
-            .exists()
-        )
-        callback_superseded = (
-            select(cl2.c.id)
-            .where(
-                and_(
-                    cl2.c.prospect_id == CallLog.prospect_id,
-                    cl2.c.outcome.in_((1, 4, 5, 6)),
-                    cl2.c.called_at > CallLog.called_at,
-                )
-            )
-            .exists()
-        )
+
+        demo_superseded = _is_later((5, 6))
+        callback_superseded = _is_later((1, 4, 5, 6))
         demo_open_pid = case((~demo_superseded, CallLog.prospect_id), else_=null())
         callback_open_pid = case(
             (~callback_superseded, CallLog.prospect_id), else_=null()
@@ -447,28 +456,28 @@ class CallLogCRUD:
         supersession check is org-wide (any caller's later row counts)."""
         from sqlalchemy import and_, case, null
         cl2 = CallLog.__table__.alias("cl2")
-        demo_superseded = (
-            select(cl2.c.id)
-            .where(
-                and_(
-                    cl2.c.prospect_id == CallLog.prospect_id,
-                    cl2.c.outcome.in_((5, 6)),
-                    cl2.c.called_at > CallLog.called_at,
+
+        def _is_later(outcomes: tuple[int, ...]):
+            return (
+                select(cl2.c.id)
+                .where(
+                    and_(
+                        cl2.c.prospect_id == CallLog.prospect_id,
+                        cl2.c.outcome.in_(outcomes),
+                        or_(
+                            cl2.c.called_at > CallLog.called_at,
+                            and_(
+                                cl2.c.called_at == CallLog.called_at,
+                                cl2.c.id > CallLog.id,
+                            ),
+                        ),
+                    )
                 )
+                .exists()
             )
-            .exists()
-        )
-        callback_superseded = (
-            select(cl2.c.id)
-            .where(
-                and_(
-                    cl2.c.prospect_id == CallLog.prospect_id,
-                    cl2.c.outcome.in_((1, 4, 5, 6)),
-                    cl2.c.called_at > CallLog.called_at,
-                )
-            )
-            .exists()
-        )
+
+        demo_superseded = _is_later((5, 6))
+        callback_superseded = _is_later((1, 4, 5, 6))
         demo_open_pid = case((~demo_superseded, CallLog.prospect_id), else_=null())
         callback_open_pid = case(
             (~callback_superseded, CallLog.prospect_id), else_=null()
