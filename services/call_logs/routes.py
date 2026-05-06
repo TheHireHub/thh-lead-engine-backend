@@ -195,7 +195,15 @@ async def list_demos_for(
 # CALL_OUTCOMES §6.26 keys, in canonical order. Every response always reports
 # all five — missing outcomes are reported as 0 so the FE doesn't need a
 # fallback path.
-_OUTCOME_KEYS: list[str] = ["rnr", "not_interested", "call_back", "follow_up", "demo_scheduled"]
+_OUTCOME_KEYS: list[str] = [
+    "rnr",
+    "not_interested",
+    "call_back",
+    "follow_up",
+    "demo_scheduled",
+    "demo_attended",
+    "demo_no_show",
+]
 
 
 def _stage_serialize(
@@ -226,6 +234,8 @@ def _stage_serialize(
 @router.get("/daily-stats")
 async def daily_stats(
     date: Optional[date_t] = None,
+    date_from: Optional[date_t] = None,
+    date_to: Optional[date_t] = None,
     owner_user_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
     # Auth-only: callers (role 4) need access to their *own* daily-stats
@@ -234,45 +244,83 @@ async def daily_stats(
     user: AdminUser = Depends(current_user),
 ) -> dict:
     """
-    Per-caller daily call counters (powers Sales Dashboard KPI strip +
-    Prospects-list call-stage chips).
+    Per-caller call counters across `[date_from, date_to]` inclusive
+    (powers Sales Dashboard KPI strip + Prospects-list call-stage chips).
 
-    Defaults: `date` → today (UTC); `owner_user_id` → current user. Only
-    admins may pass a different `owner_user_id` than their own — non-admin
-    callers can only inspect themselves (avoid cross-rep snooping).
+    Param resolution:
+      - `date_from` + `date_to` provided → use the window verbatim.
+      - Only `date` provided (legacy) → single day window.
+      - Nothing provided → today, single day.
+    `target` scales linearly with the number of days in the window so the
+    "calls today / target" ratio remains meaningful for week views.
+    `owner_user_id` defaults to current user; only admin may inspect
+    others (avoid cross-rep snooping per BUG-016).
     """
-    if date is None:
-        date = datetime.now(timezone.utc).date()
-    target_user_id = owner_user_id if owner_user_id is not None else user.id
+    today = datetime.now(timezone.utc).date()
+    if date_from is not None or date_to is not None:
+        # Range mode — fall back individually if only one bound was given.
+        d_from = date_from or date_to or today
+        d_to = date_to or date_from or today
+    elif date is not None:
+        d_from = d_to = date
+    else:
+        d_from = d_to = today
 
-    if target_user_id != user.id and user.role != 0:
-        raise HTTPException(status_code=403, detail="cannot view other users' stats")
+    if d_from > d_to:
+        raise HTTPException(status_code=400, detail="date_from must be <= date_to")
 
-    target_user = await AdminUserCRUD.get_by_id(db, target_user_id)
-    if target_user is None:
-        raise HTTPException(status_code=404, detail="caller not found")
+    days_in_range = (d_to - d_from).days + 1
 
-    calls_today = await CallLogCRUD.calls_today_count(
-        db, caller_user_id=target_user_id, day=date
-    )
-    outcomes_raw = await CallLogCRUD.outcomes_by_caller_on_date(
-        db, caller_user_id=target_user_id, day=date
-    )
+    # Admin "All" aggregate mode: admin requests stats with no rep filter →
+    # we return org-wide counters (sum across every caller), with target
+    # scaled by the number of active callers × days. Non-admin callers
+    # always default to themselves (cross-rep snoop already 403s below).
+    aggregate = owner_user_id is None and user.role == 0
+    if aggregate:
+        calls_today = await CallLogCRUD.calls_count_all_in_range(
+            db, day_from=d_from, day_to=d_to
+        )
+        outcomes_raw = await CallLogCRUD.outcomes_all_in_range(
+            db, day_from=d_from, day_to=d_to
+        )
+        in_queue = await CallLogCRUD.queue_size_all(db)
+        # Sum daily_call_target across every active caller (role 4).
+        callers = await AdminUserCRUD.list_all(db, role=4)
+        per_day_target = sum((c.daily_call_target or 0) for c in callers)
+        target = per_day_target * days_in_range
+        caller_id_for_payload = 0  # sentinel — FE treats this as "aggregate"
+    else:
+        target_user_id = owner_user_id if owner_user_id is not None else user.id
+        if target_user_id != user.id and user.role != 0:
+            raise HTTPException(status_code=403, detail="cannot view other users' stats")
+        target_user = await AdminUserCRUD.get_by_id(db, target_user_id)
+        if target_user is None:
+            raise HTTPException(status_code=404, detail="caller not found")
+        calls_today = await CallLogCRUD.calls_count_in_range(
+            db, caller_user_id=target_user_id, day_from=d_from, day_to=d_to
+        )
+        outcomes_raw = await CallLogCRUD.outcomes_in_range(
+            db, caller_user_id=target_user_id, day_from=d_from, day_to=d_to
+        )
+        in_queue = await CallLogCRUD.queue_size_for_caller(
+            db, caller_user_id=target_user_id
+        )
+        target = target_user.daily_call_target * days_in_range
+        caller_id_for_payload = target_user_id
+
     by_outcome = {key: 0 for key in _OUTCOME_KEYS}
     for outcome_int, count in outcomes_raw.items():
         label = get_label(CALL_OUTCOMES, outcome_int)
         if label in by_outcome:
             by_outcome[label] = count
 
-    in_queue = await CallLogCRUD.queue_size_for_caller(
-        db, caller_user_id=target_user_id
-    )
-
     payload = DailyStatsOut(
-        caller_user_id=target_user_id,
-        date=date,
+        caller_user_id=caller_id_for_payload,
+        date=d_to,
+        date_from=d_from,
+        date_to=d_to,
         calls_today=calls_today,
-        target=target_user.daily_call_target,
+        target=target,
         in_queue=in_queue,
         by_outcome=by_outcome,
     )
@@ -300,17 +348,24 @@ async def call_queue(
     """
     if date is None:
         date = datetime.now(timezone.utc).date()
-    target_user_id = owner_user_id if owner_user_id is not None else user.id
 
-    if target_user_id != user.id and user.role != 0:
-        raise HTTPException(status_code=403, detail="cannot view other users' queue")
-
-    rows = await CallLogCRUD.queue_for_caller(
-        db, caller_user_id=target_user_id, limit=limit, offset=offset
-    )
-    total = await CallLogCRUD.queue_size_for_caller(
-        db, caller_user_id=target_user_id
-    )
+    # Admin "All" aggregate mode (mirrors /daily-stats): admin with no rep
+    # filter selected → org-wide queue across every eligible prospect.
+    aggregate = owner_user_id is None and user.role == 0
+    if aggregate:
+        rows = await CallLogCRUD.queue_all(db, limit=limit, offset=offset)
+        total = await CallLogCRUD.queue_size_all(db)
+        target_user_id = 0  # sentinel
+    else:
+        target_user_id = owner_user_id if owner_user_id is not None else user.id
+        if target_user_id != user.id and user.role != 0:
+            raise HTTPException(status_code=403, detail="cannot view other users' queue")
+        rows = await CallLogCRUD.queue_for_caller(
+            db, caller_user_id=target_user_id, limit=limit, offset=offset
+        )
+        total = await CallLogCRUD.queue_size_for_caller(
+            db, caller_user_id=target_user_id
+        )
     company_ids = [p.company_id for p in rows if p.company_id is not None]
     company_map = await _company_name_map(db, company_ids)
     outcome_map = await _latest_outcome_map(db, [p.id for p in rows])

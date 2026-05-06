@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date as date_t, datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -13,7 +13,7 @@ class CallLogCreate(BaseModel):
     the authenticated user (not accepted from the client) — see §5.5."""
 
     prospect_id: int
-    outcome: int = Field(ge=0, le=4, description="see CALL_OUTCOMES §6.26")
+    outcome: int = Field(ge=0, le=6, description="see CALL_OUTCOMES §6.26")
     callback_at: Optional[datetime] = None
     notes: Optional[str] = None
 
@@ -61,11 +61,18 @@ class DailyStatsOut(BaseModel):
     Per-caller daily call statistics (powers the Sales Dashboard's KPI
     strip + per-rep cards). `by_outcome` keys mirror CALL_OUTCOMES §6.26
     labels exactly so FE doesn't need a second mapping table.
+
+    `date_from`/`date_to` is the inclusive window the counters were summed
+    over. When the FE asks for a single day both fields are the same; the
+    legacy `date` field still echoes `date_to` for back-compat with any
+    consumer that hasn't migrated to the range pair yet.
     """
     caller_user_id: int
-    date: date
-    calls_today: int
-    target: int = Field(description="caller's daily_call_target (admin_users column)")
+    date: date_t = Field(description="alias for date_to — kept for back-compat")
+    date_from: date_t
+    date_to: date_t
+    calls_today: int = Field(description="UNIQUE prospects dialled in [date_from, date_to]")
+    target: int = Field(description="caller's daily_call_target × number of days in range")
     in_queue: int = Field(description="prospects still eligible to call right now")
     by_outcome: dict[str, int] = Field(
         description=(
@@ -95,6 +102,6 @@ class QueueRow(BaseModel):
 
 class QueueOut(BaseModel):
     caller_user_id: int
-    date: date
+    date: date_t
     total: int
     rows: list[QueueRow]

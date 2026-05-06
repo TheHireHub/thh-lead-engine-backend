@@ -10,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.crud import AdminUserCRUD
 from services.admin_users.deps import (
+    ROLE_CALLER,
     require_admin,
     require_dashboard_read,
     require_growth_or_bdr,
     require_internal,
+    require_internal_or_caller,
     require_sales,
 )
 from services.admin_users.models import AdminUser
@@ -103,6 +105,7 @@ def _audit_payload(p) -> dict:
         "heat_score": p.heat_score,
         "source_channel": p.source_channel,
         "owner_user_id": p.owner_user_id,
+        "created_by_user_id": p.created_by_user_id,
     }
 
 
@@ -396,7 +399,7 @@ async def create_prospect(
     payload: ProspectCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(require_growth_or_bdr),
+    user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     # Arch-6 dedupe priority: LinkedIn URL > email > phone.
     duplicate = await find_existing(
@@ -411,7 +414,16 @@ async def create_prospect(
             detail={"message": "prospect already exists", "id": duplicate.id},
         )
 
-    prospect = await ProspectCRUD.create(db, **payload.model_dump(exclude_none=True))
+    fields = payload.model_dump(exclude_none=True)
+    # Caller can't PATCH owner_user_id (require_growth_or_bdr blocks role 4),
+    # so for caller-initiated creates we auto-assign ownership to themselves
+    # — the lead lands on their queue immediately and admins can still see
+    # it under the rep filter.
+    if user.role == ROLE_CALLER:
+        fields.setdefault("owner_user_id", user.id)
+    prospect = await ProspectCRUD.create(
+        db, created_by_user_id=user.id, **fields,
+    )
     # Arch-22 quality score on insert.
     score = await _quality_for_prospect(db, prospect)
     if score:

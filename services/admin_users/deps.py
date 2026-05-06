@@ -118,6 +118,13 @@ require_internal = require_role(
 """Anyone except Caller (RBAC-isolated) and Viewer — most read-mutate endpoints
 that the caller-role shouldn't see."""
 
+require_internal_or_caller = require_role(
+    ROLE_ADMIN, ROLE_GROWTH, ROLE_BDR, ROLE_SALES, ROLE_CSM, ROLE_CALLER
+)
+"""Internal roles + Caller — narrow widening for endpoints where the caller is
+allowed to act on their own queue (e.g. POST /api/prospects so a caller can
+self-source leads they then see via `created_by_user_id` scope §5.5)."""
+
 require_dashboard_read = require_role(
     ROLE_ADMIN, ROLE_GROWTH, ROLE_BDR, ROLE_SALES, ROLE_CSM, ROLE_VIEWER
 )

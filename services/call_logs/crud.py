@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.audit.crud import AuditLogCRUD
@@ -54,7 +54,12 @@ class CallLogCRUD:
         """Generic helper — returns this caller's calls for a given outcome,
         with `callback_at` set, ordered ascending. Used for both the
         Callbacks panel (outcome=2) and the Demos panel (outcome=4) on the
-        Sales Dashboard."""
+        Sales Dashboard.
+
+        Demos (outcome=4) are filtered to drop rows whose prospect already
+        has a newer terminal demo outcome (5 demo_attended | 6 demo_no_show)
+        — once a rep marks the demo done, the card should leave Upcoming so
+        rapid re-clicks can't double-count (user complaint 2026-05-05)."""
         stmt = select(CallLog).where(
             CallLog.caller_user_id == caller_user_id,
             CallLog.outcome == outcome,
@@ -62,6 +67,28 @@ class CallLogCRUD:
         )
         if upcoming_only:
             stmt = stmt.where(CallLog.callback_at >= datetime.now(timezone.utc))
+        if outcome in (2, 4):
+            # Correlated subquery: drop a demo_scheduled (4) row if a later
+            # 5 / 6 exists for the same prospect — the demo's been resolved.
+            # Drop a call_back (2) row if a later 1 / 4 / 5 / 6 exists — the
+            # callback request was consumed (prospect either lost interest,
+            # scheduled a demo, or completed one). RNR / follow_up / another
+            # call_back DON'T consume a callback — those are mid-flight
+            # attempts, not resolutions. Keeps Upcoming + KPI showing only
+            # OPEN state (user request 2026-05-05 "remove from demo
+            # scheduled when attended; check others").
+            from sqlalchemy import and_
+            cl2 = CallLog.__table__.alias("cl2")
+            superseding = (5, 6) if outcome == 4 else (1, 4, 5, 6)
+            stmt = stmt.where(
+                ~select(cl2.c.id).where(
+                    and_(
+                        cl2.c.prospect_id == CallLog.prospect_id,
+                        cl2.c.outcome.in_(superseding),
+                        cl2.c.called_at > CallLog.called_at,
+                    )
+                ).exists()
+            )
         stmt = stmt.order_by(CallLog.callback_at.asc())
         result = await db.execute(stmt)
         return list(result.scalars().all())
@@ -142,10 +169,14 @@ class CallLogCRUD:
 
         # MySQL doesn't support NULLS FIRST — emulate with two-level sort:
         # rows where last_touched_at IS NULL come first, then by ASC.
+        # Caller scope: assigned-to-me OR added-by-me (§5.5 BDR isolation).
         stmt = (
             select(Prospect)
             .where(
-                Prospect.owner_user_id == caller_user_id,
+                or_(
+                    Prospect.owner_user_id == caller_user_id,
+                    Prospect.created_by_user_id == caller_user_id,
+                ),
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
                 Prospect.id.not_in(recent_rnr),
@@ -210,6 +241,106 @@ class CallLogCRUD:
         return {int(outcome): int(cnt or 0) for outcome, cnt in result.all()}
 
     @staticmethod
+    async def calls_count_in_range(
+        db: AsyncSession, *, caller_user_id: int, day_from: date, day_to: date
+    ) -> int:
+        """
+        Same semantics as `calls_today_count` but across `[day_from, day_to]`
+        inclusive. UNIQUE-prospect dedup is per-day so a prospect dialled on
+        Mon AND Tue counts twice across the week (once per day) — matches
+        what a manager wants to see when summing daily targets across a span.
+        """
+        stmt = (
+            select(func.date(CallLog.called_at), func.count(func.distinct(CallLog.prospect_id)))
+            .where(
+                CallLog.caller_user_id == caller_user_id,
+                func.date(CallLog.called_at) >= day_from,
+                func.date(CallLog.called_at) <= day_to,
+            )
+            .group_by(func.date(CallLog.called_at))
+        )
+        result = await db.execute(stmt)
+        return int(sum(int(cnt or 0) for _d, cnt in result.all()))
+
+    @staticmethod
+    async def outcomes_in_range(
+        db: AsyncSession, *, caller_user_id: int, day_from: date, day_to: date
+    ) -> dict[int, int]:
+        """
+        `{outcome_int: count}` summed across `[day_from, day_to]` inclusive.
+        Per-outcome count semantics:
+          - Terminal (5 attended, 6 no_show): DISTINCT prospect — historical.
+          - Demo Scheduled (4): DISTINCT prospect AND no later 5/6 for the
+            same prospect — open demos only (user 2026-05-05).
+          - Callback (2): DISTINCT prospect AND no later 1/4/5/6 — open
+            callbacks only. RNR/follow_up/another callback don't consume
+            a callback (mid-flight attempts, not resolutions).
+          - Everything else (rnr 0, not_interested 1, follow_up 3): raw
+            row count (daily-activity stats; same prospect can legitimately
+            be RNR'd or followed up multiple times).
+        """
+        from sqlalchemy import and_, case, null
+        # Supersession check is org-wide (no caller_user_id filter on cl2):
+        # if any caller marks the prospect as not_interested / demo_*, every
+        # rep's earlier open-state row for that prospect is consumed. Mirrors
+        # the same org-wide rule used by `list_calls_by_outcome_for_caller`.
+        cl2 = CallLog.__table__.alias("cl2")
+        demo_superseded = (
+            select(cl2.c.id)
+            .where(
+                and_(
+                    cl2.c.prospect_id == CallLog.prospect_id,
+                    cl2.c.outcome.in_((5, 6)),
+                    cl2.c.called_at > CallLog.called_at,
+                )
+            )
+            .exists()
+        )
+        callback_superseded = (
+            select(cl2.c.id)
+            .where(
+                and_(
+                    cl2.c.prospect_id == CallLog.prospect_id,
+                    cl2.c.outcome.in_((1, 4, 5, 6)),
+                    cl2.c.called_at > CallLog.called_at,
+                )
+            )
+            .exists()
+        )
+        demo_open_pid = case((~demo_superseded, CallLog.prospect_id), else_=null())
+        callback_open_pid = case(
+            (~callback_superseded, CallLog.prospect_id), else_=null()
+        )
+        stmt = (
+            select(
+                CallLog.outcome,
+                func.count(CallLog.id).label("raw_count"),
+                func.count(func.distinct(CallLog.prospect_id)).label("uniq_count"),
+                func.count(func.distinct(demo_open_pid)).label("demo_open"),
+                func.count(func.distinct(callback_open_pid)).label("callback_open"),
+            )
+            .where(
+                CallLog.caller_user_id == caller_user_id,
+                func.date(CallLog.called_at) >= day_from,
+                func.date(CallLog.called_at) <= day_to,
+            )
+            .group_by(CallLog.outcome)
+        )
+        result = await db.execute(stmt)
+        out: dict[int, int] = {}
+        for outcome, raw, uniq, demo_open, cb_open in result.all():
+            o = int(outcome)
+            if o == 2:
+                out[o] = int(cb_open or 0)
+            elif o == 4:
+                out[o] = int(demo_open or 0)
+            elif o in (5, 6):
+                out[o] = int(uniq or 0)
+            else:
+                out[o] = int(raw or 0)
+        return out
+
+    @staticmethod
     async def queue_size_for_caller(
         db: AsyncSession, *, caller_user_id: int
     ) -> int:
@@ -225,7 +356,10 @@ class CallLogCRUD:
             .scalar_subquery()
         )
         stmt = select(func.count(Prospect.id)).where(
-            Prospect.owner_user_id == caller_user_id,
+            or_(
+                Prospect.owner_user_id == caller_user_id,
+                Prospect.created_by_user_id == caller_user_id,
+            ),
             Prospect.deleted_at.is_(None),
             Prospect.stage.not_in(EXCLUDED_STAGES),
             Prospect.id.not_in(recent_rnr),
@@ -255,7 +389,10 @@ class CallLogCRUD:
         stmt = (
             select(Prospect)
             .where(
-                Prospect.owner_user_id == caller_user_id,
+                or_(
+                    Prospect.owner_user_id == caller_user_id,
+                    Prospect.created_by_user_id == caller_user_id,
+                ),
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
                 Prospect.id.not_in(recent_rnr),
@@ -269,6 +406,136 @@ class CallLogCRUD:
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    # --- admin "All" aggregate paths (no caller scope) --------------------
+    # Used when an admin views the Sales Dashboard with no rep filter selected:
+    # show every eligible prospect across the org, not just admin-owned ones.
+
+    @staticmethod
+    async def queue_size_all(db: AsyncSession) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent_rnr = (
+            select(CallLog.prospect_id)
+            .where(CallLog.outcome == 0, CallLog.called_at >= cutoff)
+            .scalar_subquery()
+        )
+        stmt = select(func.count(Prospect.id)).where(
+            Prospect.deleted_at.is_(None),
+            Prospect.stage.not_in(EXCLUDED_STAGES),
+            Prospect.id.not_in(recent_rnr),
+        )
+        result = await db.execute(stmt)
+        return int(result.scalar_one() or 0)
+
+    @staticmethod
+    async def queue_all(
+        db: AsyncSession, *, limit: int = 100, offset: int = 0
+    ) -> list[Prospect]:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent_rnr = (
+            select(CallLog.prospect_id)
+            .where(CallLog.outcome == 0, CallLog.called_at >= cutoff)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(Prospect)
+            .where(
+                Prospect.deleted_at.is_(None),
+                Prospect.stage.not_in(EXCLUDED_STAGES),
+                Prospect.id.not_in(recent_rnr),
+            )
+            .order_by(
+                Prospect.last_touched_at.is_(None).desc(),
+                Prospect.last_touched_at.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def calls_count_all_in_range(
+        db: AsyncSession, *, day_from: date, day_to: date
+    ) -> int:
+        """Sum of every caller's UNIQUE-prospect-per-day calls in the window."""
+        stmt = (
+            select(
+                CallLog.caller_user_id,
+                func.date(CallLog.called_at),
+                func.count(func.distinct(CallLog.prospect_id)),
+            )
+            .where(
+                func.date(CallLog.called_at) >= day_from,
+                func.date(CallLog.called_at) <= day_to,
+            )
+            .group_by(CallLog.caller_user_id, func.date(CallLog.called_at))
+        )
+        result = await db.execute(stmt)
+        return int(sum(int(cnt or 0) for _u, _d, cnt in result.all()))
+
+    @staticmethod
+    async def outcomes_all_in_range(
+        db: AsyncSession, *, day_from: date, day_to: date
+    ) -> dict[int, int]:
+        """`{outcome_int: count}` summed across every caller in the window.
+        Same per-outcome rules as `outcomes_in_range`. Difference: the
+        supersession check is org-wide (any caller's later row counts)."""
+        from sqlalchemy import and_, case, null
+        cl2 = CallLog.__table__.alias("cl2")
+        demo_superseded = (
+            select(cl2.c.id)
+            .where(
+                and_(
+                    cl2.c.prospect_id == CallLog.prospect_id,
+                    cl2.c.outcome.in_((5, 6)),
+                    cl2.c.called_at > CallLog.called_at,
+                )
+            )
+            .exists()
+        )
+        callback_superseded = (
+            select(cl2.c.id)
+            .where(
+                and_(
+                    cl2.c.prospect_id == CallLog.prospect_id,
+                    cl2.c.outcome.in_((1, 4, 5, 6)),
+                    cl2.c.called_at > CallLog.called_at,
+                )
+            )
+            .exists()
+        )
+        demo_open_pid = case((~demo_superseded, CallLog.prospect_id), else_=null())
+        callback_open_pid = case(
+            (~callback_superseded, CallLog.prospect_id), else_=null()
+        )
+        stmt = (
+            select(
+                CallLog.outcome,
+                func.count(CallLog.id).label("raw_count"),
+                func.count(func.distinct(CallLog.prospect_id)).label("uniq_count"),
+                func.count(func.distinct(demo_open_pid)).label("demo_open"),
+                func.count(func.distinct(callback_open_pid)).label("callback_open"),
+            )
+            .where(
+                func.date(CallLog.called_at) >= day_from,
+                func.date(CallLog.called_at) <= day_to,
+            )
+            .group_by(CallLog.outcome)
+        )
+        result = await db.execute(stmt)
+        out: dict[int, int] = {}
+        for outcome, raw, uniq, demo_open, cb_open in result.all():
+            o = int(outcome)
+            if o == 2:
+                out[o] = int(cb_open or 0)
+            elif o == 4:
+                out[o] = int(demo_open or 0)
+            elif o in (5, 6):
+                out[o] = int(uniq or 0)
+            else:
+                out[o] = int(raw or 0)
+        return out
 
     @staticmethod
     async def latest_per_prospect(

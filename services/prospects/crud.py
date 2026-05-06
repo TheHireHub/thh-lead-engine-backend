@@ -117,9 +117,12 @@ class ProspectCRUD:
 
     @staticmethod
     async def update(db: AsyncSession, prospect: Prospect, **fields) -> Prospect:
+        # Set every field exactly as passed — including explicit None — so PATCH
+        # can clear nullable columns (e.g. owner_user_id → NULL when admin
+        # picks "Unassigned" in the queue). Callers that want "skip if missing"
+        # must pre-filter their kwargs (see workers/tasks/apollo_sync.py).
         for key, value in fields.items():
-            if value is not None:
-                setattr(prospect, key, value)
+            setattr(prospect, key, value)
         await db.commit()
         await db.refresh(prospect)
         return prospect
