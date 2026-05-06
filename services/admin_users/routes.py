@@ -170,7 +170,11 @@ async def create_user(
         existing.first_name = payload.first_name
         existing.last_name = payload.last_name
         existing.role = payload.role
-        existing.daily_call_target = payload.daily_call_target
+        # daily_call_target is NOT NULL with default 80; only override when
+        # the create payload explicitly provided it (otherwise we'd null
+        # out a column that can't be null and crash the restore).
+        if payload.daily_call_target is not None:
+            existing.daily_call_target = payload.daily_call_target
         existing.avatar_color = payload.avatar_color
         existing.last_login_at = None
         await db.commit()
