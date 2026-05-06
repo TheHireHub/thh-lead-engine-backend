@@ -102,6 +102,8 @@ class QueueRow(BaseModel):
     # Time" column. Null when the rep hasn't set one — FE renders "—" in
     # that case (no overdue chip).
     next_callback_at: Optional[datetime] = None
+    source_channel: Optional[int] = None
+    source_channel_label: Optional[str] = None
     rnr_count: int
 
 
