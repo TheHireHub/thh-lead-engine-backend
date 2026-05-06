@@ -199,6 +199,8 @@ CALL_OUTCOMES = {
     2: "call_back",
     3: "follow_up",
     4: "demo_scheduled",
+    5: "demo_attended",
+    6: "demo_no_show",
 }
 
 # §6.27 Job board

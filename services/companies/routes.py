@@ -11,6 +11,7 @@ from services.admin_users.deps import (
     require_dashboard_read,
     require_growth_or_bdr,
     require_internal,
+    require_internal_or_caller,
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
@@ -42,7 +43,9 @@ async def list_companies(
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _user: AdminUser = Depends(require_dashboard_read),
+    # Caller needs the dropdown to attach a self-sourced lead to the right
+    # company on the Sales Dashboard Add-Lead modal (RBAC narrow-widening).
+    _user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     companies = await CompanyCRUD.list_all(
         db,
@@ -84,7 +87,9 @@ async def create_company(
     payload: CompanyCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: AdminUser = Depends(require_growth_or_bdr),
+    # Caller may need to create a fresh company row when self-sourcing a
+    # lead on the Sales Dashboard. Same narrow widening as list/get above.
+    user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
     if payload.domain and await CompanyCRUD.get_by_domain(db, payload.domain):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="company with this domain exists")

@@ -43,6 +43,7 @@ class Prospect(Base):
         Index("idx_prospects_phone", "phone"),
         Index("idx_prospects_stage", "stage"),
         Index("idx_prospects_owner_user_id", "owner_user_id"),
+        Index("idx_prospects_created_by_user_id", "created_by_user_id"),
         Index("idx_prospects_source_channel", "source_channel"),
         Index("idx_prospects_company_id", "company_id"),
         Index("idx_prospects_thh_user_id", "thh_user_id"),
@@ -73,6 +74,12 @@ class Prospect(Base):
     quality_score: Mapped[int] = mapped_column(TINYINT(unsigned=True), nullable=False, default=0, comment="ICP fit 0-10")
     source_channel: Mapped[int] = mapped_column(TINYINT(unsigned=True), nullable=False, default=12, comment="see CHANNELS §6.3")
     owner_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("admin_users.id", ondelete="SET NULL", onupdate="CASCADE"), nullable=True
+    )
+    # Caller-scope rule (§5.5 BDR isolation): a caller sees a prospect when
+    # they OWN it (`owner_user_id`) OR ADDED it (`created_by_user_id`).
+    # NULL for system-driven inserts (Apollo cron, signup webhooks, etc).
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("admin_users.id", ondelete="SET NULL", onupdate="CASCADE"), nullable=True
     )
     apollo_contact_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
