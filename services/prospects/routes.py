@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -422,7 +423,8 @@ async def create_prospect(
     db: AsyncSession = Depends(get_db),
     user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
-    # Arch-6 dedupe priority: LinkedIn URL > email > phone.
+    # Arch-6 v2 dedupe: LinkedIn URL OR email (phone excluded — corporate
+    # switchboards collapse colleagues into one prospect, see dedupe.py).
     duplicate = await find_existing(
         db,
         linkedin_url=payload.linkedin_url,
@@ -663,22 +665,99 @@ async def delete_prospect(
 # {created, skipped, errors}. Caller-imported leads auto-assign owner+
 # created_by to the caller (same rule as the manual create_prospect path).
 _CSV_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
-    "first_name": ("First Name", "first_name"),
-    "last_name": ("Last Name", "last_name"),
+    "first_name": ("First Name", "first_name", "FirstName"),
+    "last_name": ("Last Name", "last_name", "LastName"),
     "title": ("Title", "Job Title", "title"),
-    "company_name": ("Company", "Company Name", "company"),
-    "email": ("Email", "email"),
-    "linkedin_url": ("Person Linkedin Url", "Person LinkedIn Url", "LinkedIn Url", "linkedin_url"),
+    "company_name": ("Company Name", "Company", "company"),
+    "email": ("Email", "email", "Work Email", "Email Address"),
+    "linkedin_url": (
+        "Person Linkedin Url",
+        "Person LinkedIn Url",
+        "LinkedIn Url",
+        "Linkedin Url",
+        "linkedin_url",
+    ),
     "phone": (
         "Work Direct Phone",
         "Work Phone",
         "Mobile Phone",
+        "Mobile",
         "Corporate Phone",
         "Other Phone",
         "Home Phone",
+        "Phone",
         "phone",
     ),
+    # Per-row source column. Apollo's contact export labels this "Primary
+    # Email Verification Source" (the value is usually "Apollo" itself —
+    # that's the platform that verified the email, so it doubles as the
+    # source signal). Other CSVs use "Source" / "Lead Source".
+    "source": (
+        "Primary Email Verification Source",
+        "Lead Source",
+        "Source",
+        "source",
+    ),
 }
+
+# Map free-text source column values to CHANNELS §6.3 ints. Lookup is
+# case-insensitive + ignores surrounding whitespace + dashes/underscores.
+# Anything unrecognised falls through to the default `source_channel`
+# form value (typically apollo when the importer is using the Apollo
+# CSV export).
+_SOURCE_TEXT_TO_CHANNEL: dict[str, int] = {
+    "cold email": 0,
+    "email": 0,
+    "linkedin": 1,
+    "linked in": 1,
+    "paid": 2,
+    "paid ads": 2,
+    "ads": 2,
+    "seo": 3,
+    "geo": 4,
+    "brand": 5,
+    "remarketing": 6,
+    "social": 7,
+    "wom": 8,
+    "word of mouth": 8,
+    "apollo": 9,
+    "warmly": 10,
+    "direct": 11,
+    "manual": 11,
+    "other": 12,
+}
+
+
+def _parse_source_text(raw: str | None, default: int) -> int:
+    """Map a free-text "source" column value to a CHANNELS int."""
+    if not raw:
+        return default
+    norm = raw.strip().lower().replace("_", " ").replace("-", " ")
+    norm = " ".join(norm.split())  # collapse whitespace
+    if not norm:
+        return default
+    return _SOURCE_TEXT_TO_CHANNEL.get(norm, default)
+
+
+# SharePoint personal share URLs (the `:x:/g/personal/<user>/<token>...`
+# variant) return 403 to anonymous fetch — the share token has to be
+# passed to `_layouts/15/download.aspx?share=<token>` instead. Detect
+# and rewrite so users can paste the URL straight from "Share" in
+# Excel-online without any extra dance.
+_SHAREPOINT_SHARE_RE = re.compile(
+    r"^(?P<host>https?://[^/]*sharepoint\.com)/:[a-z]:/g/personal/(?P<user>[^/]+)/(?P<token>[^/?#]+)",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_sharepoint_url(url: str) -> str:
+    m = _SHAREPOINT_SHARE_RE.match(url)
+    if not m:
+        return url
+    return (
+        f"{m.group('host')}/personal/{m.group('user')}"
+        f"/_layouts/15/download.aspx?share={m.group('token')}"
+    )
 
 
 def _pick(row: dict, key: str) -> str:
@@ -696,7 +775,11 @@ def _pick(row: dict, key: str) -> str:
 async def import_csv(
     file: UploadFile | None = File(default=None),
     url: str | None = Form(default=None),
-    source_channel: int = Form(9),  # default = apollo (CHANNELS §6.3)
+    # Optional fallback when neither the per-row source column nor a CSV
+    # default is present. None → defer to the Prospect model's column
+    # default (12 = "other"), which keeps source effectively empty until
+    # the CSV provides a real value.
+    source_channel: int | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
     user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
@@ -720,9 +803,15 @@ async def import_csv(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="url must be http(s)",
             )
+        # SharePoint share URLs (the `:x:/g/personal/...` form) are 403
+        # for anonymous fetch — auto-rewrite to the public `download.aspx`
+        # variant so the user can paste the link straight from Excel-online.
+        fetch_url = _rewrite_sharepoint_url(url)
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                r = await client.get(url)
+            async with httpx.AsyncClient(
+                timeout=20, follow_redirects=True
+            ) as client:
+                r = await client.get(fetch_url)
                 r.raise_for_status()
                 raw_bytes = r.content
         except httpx.HTTPError as exc:
@@ -762,6 +851,11 @@ async def import_csv(
                 errors.append({"row": idx, "reason": "no email/phone/linkedin"})
                 continue
 
+            # Per-row source: if the CSV has a recognised source column,
+            # use that; otherwise fall back to the form `source_channel`,
+            # otherwise leave None so the model default ("other") applies.
+            row_source = _parse_source_text(_pick(row, "source"), source_channel)
+
             existing = await find_existing(
                 db, linkedin_url=linkedin_url, email=email, phone=phone
             )
@@ -791,22 +885,27 @@ async def import_csv(
                     )
                     company_id = new_co.id
 
-            await ProspectCRUD.create(
-                db,
-                first_name=first_name,
-                last_name=last_name,
-                title=title,
-                company_id=company_id,
-                email=email,
-                phone=phone,
-                linkedin_url=linkedin_url,
-                source_channel=source_channel,
-                stage=0,
-                created_by_user_id=user.id,
+            create_kwargs = {
+                "first_name": first_name,
+                "last_name": last_name,
+                "title": title,
+                "company_id": company_id,
+                "email": email,
+                "phone": phone,
+                "linkedin_url": linkedin_url,
+                "stage": 0,
+                "created_by_user_id": user.id,
                 # Caller imports auto-route to themselves so the new leads
                 # land in their own /sales queue immediately.
-                owner_user_id=user.id if user.role == ROLE_CALLER else None,
-            )
+                "owner_user_id": user.id if user.role == ROLE_CALLER else None,
+            }
+            # Only pass source_channel if we resolved one — otherwise let
+            # SQLAlchemy use the column default (12 = "other"). User asked
+            # for "no value when CSV doesn't have one" rather than forcing
+            # a guessed channel like Apollo.
+            if row_source is not None:
+                create_kwargs["source_channel"] = row_source
+            await ProspectCRUD.create(db, **create_kwargs)
             created += 1
         except Exception as exc:
             errors.append({"row": idx, "reason": str(exc)[:200]})
