@@ -55,6 +55,21 @@ router = APIRouter(prefix="/api/prospects", tags=["prospects"])
 _URGENT_WINDOW = timedelta(minutes=60)
 
 
+async def _ensure_owner_is_caller(db: AsyncSession, owner_user_id: int) -> None:
+    """Reject 422 if owner_user_id does not reference an active caller (role=4).
+
+    Ownership is the queue-work assignment, so only callers can hold it.
+    Admin/growth/bdr/sales/csm/viewer manage the queue but never work it.
+    NULL ownership is legal and bypasses this check at the call site.
+    """
+    target = await AdminUserCRUD.get_by_id(db, owner_user_id)
+    if target is None or target.role != ROLE_CALLER:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="owner_user_id must reference an active caller",
+        )
+
+
 def _serialize(p, owner_names: dict[int, str] | None = None) -> dict:
     out = ProspectOut.model_validate(p).model_dump(mode="json")
     out["stage_label"] = get_label(FUNNEL_STAGES, p.stage)
@@ -444,6 +459,12 @@ async def create_prospect(
     # it under the rep filter.
     if user.role == ROLE_CALLER:
         fields.setdefault("owner_user_id", user.id)
+    # owner_user_id must reference an active CALLER (role=4). Non-callers
+    # (admin, growth, bdr, sales, csm, viewer) own nothing — they manage
+    # the queue, they don't work it. NULL = unassigned (legal).
+    proposed_owner = fields.get("owner_user_id")
+    if proposed_owner is not None:
+        await _ensure_owner_is_caller(db, proposed_owner)
     prospect = await ProspectCRUD.create(
         db, created_by_user_id=user.id, **fields,
     )
@@ -482,6 +503,12 @@ async def update_prospect(
     # was later deleted). Phone is excluded for the same reason as the
     # CSV import: corporate switchboards are shared.
     fields_in = payload.model_dump(exclude_unset=True)
+    # Reassign target validation: owner_user_id must be an active CALLER
+    # (role=4) or NULL (unassigned). Admins managing the queue can't pull
+    # leads onto themselves — they assign to callers. This is the
+    # canonical RBAC for ownership and replaces the FE-only filter.
+    if "owner_user_id" in fields_in and fields_in["owner_user_id"] is not None:
+        await _ensure_owner_is_caller(db, fields_in["owner_user_id"])
     new_linkedin = fields_in.get("linkedin_url")
     new_email = fields_in.get("email")
     if new_linkedin or new_email:
@@ -853,10 +880,20 @@ async def import_csv(
     raw = raw_bytes.decode("utf-8-sig", errors="replace")
     reader = _csv.DictReader(io.StringIO(raw))
 
+    # Round-robin auto-assign for non-caller imports (admin/growth/bdr).
+    # Caller imports go entirely to the importer (auto-route below).
+    # Empty caller pool → leads land unassigned and admin can reassign later.
+    rr_pool: list[int] = []
+    rr_idx = 0
+    if user.role != ROLE_CALLER:
+        active_callers = await AdminUserCRUD.list_all(db, role=ROLE_CALLER)
+        rr_pool = [c.id for c in active_callers]
+
     created = 0
     skipped = 0
     errors: list[dict] = []
     last_idx = 1
+    assigned_counts: dict[int, int] = {}
 
     for idx, row in enumerate(reader, start=2):  # row 1 = header
         last_idx = idx
@@ -910,6 +947,20 @@ async def import_csv(
                     )
                     company_id = new_co.id
 
+            # Ownership rules on import:
+            # - caller importer → all rows go to the caller (auto-route).
+            # - admin/growth/bdr → round-robin across active callers
+            #   (rr_pool). Empty pool → owner stays None and admin can
+            #   reassign manually later. Round-robin keeps assignment fair
+            #   across the team without needing a separate "distribute"
+            #   button.
+            if user.role == ROLE_CALLER:
+                row_owner: int | None = user.id
+            elif rr_pool:
+                row_owner = rr_pool[rr_idx % len(rr_pool)]
+                rr_idx += 1
+            else:
+                row_owner = None
             create_kwargs = {
                 "first_name": first_name,
                 "last_name": last_name,
@@ -920,9 +971,7 @@ async def import_csv(
                 "linkedin_url": linkedin_url,
                 "stage": 0,
                 "created_by_user_id": user.id,
-                # Caller imports auto-route to themselves so the new leads
-                # land in their own /sales queue immediately.
-                "owner_user_id": user.id if user.role == ROLE_CALLER else None,
+                "owner_user_id": row_owner,
             }
             # Only pass source_channel if we resolved one — otherwise let
             # SQLAlchemy use the column default (12 = "other"). User asked
@@ -932,6 +981,8 @@ async def import_csv(
                 create_kwargs["source_channel"] = row_source
             await ProspectCRUD.create(db, **create_kwargs)
             created += 1
+            if row_owner is not None:
+                assigned_counts[row_owner] = assigned_counts.get(row_owner, 0) + 1
         except Exception as exc:
             errors.append({"row": idx, "reason": str(exc)[:200]})
             await db.rollback()
@@ -945,6 +996,20 @@ async def import_csv(
         after_json={"created": created, "skipped": skipped, "error_count": len(errors)},
     )
 
+    # Resolve caller ids → display names so the FE can show the
+    # round-robin distribution back to the user (e.g. "Alice 4, Bob 3").
+    # Append #id when two callers share a display name so counts don't
+    # collapse into one bucket — keeping the dict shape unique-keyed and
+    # the FE renderer trivial.
+    assigned_names: dict[str, int] = {}
+    if assigned_counts:
+        names = await AdminUserCRUD.names_by_ids(db, list(assigned_counts.keys()))
+        used: set[str] = set()
+        for uid, n in assigned_counts.items():
+            base = names.get(uid) or f"#{uid}"
+            label = base if base not in used else f"{base} #{uid}"
+            used.add(label)
+            assigned_names[label] = n
     return ok(
         {
             "created": created,
@@ -952,6 +1017,7 @@ async def import_csv(
             "errors": errors[:50],  # cap so we don't ship 5000 dupes' rows back
             "error_count": len(errors),
             "total_rows": max(0, last_idx - 1),
+            "assigned_to": assigned_names,
         },
         message=f"imported {created} leads ({skipped} duplicates, {len(errors)} errors)",
     )

@@ -18,6 +18,10 @@ class ProspectCreate(BaseModel):
     company_id: Optional[int] = None
     source_channel: int = Field(default=12, ge=0, le=12, description="see CHANNELS §6.3")
     apollo_contact_id: Optional[str] = Field(default=None, max_length=100)
+    # Optional owner at create time — route validates the target is an
+    # active caller (role=4) before persist. Caller-initiated creates
+    # auto-route to themselves regardless of this field.
+    owner_user_id: Optional[int] = None
 
 
 class ProspectUpdate(BaseModel):
