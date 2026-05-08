@@ -1,5 +1,9 @@
 # THH Lead Engine — Backend Instructions
 
+## Git identity (THH repos only)
+
+All commits to this repo MUST be authored by `Lakshay Jain <lakshay@thehirehub.ai>`, NOT the personal `lakshay2007jain@gmail.com`. The repo-local `user.email`/`user.name` is already set; do not override with `--global`. If a commit lands under the personal email, fix it before pushing (`git commit --amend --reset-author`). This applies to all 4 THH repos.
+
 This is the **outbound growth / prospect-conversion** system. Separate
 database, separate app, separate domain from `thh-backend`. Talks to
 `thh-backend` over exactly five HTTP endpoints (Schema doc §9).
@@ -7,6 +11,22 @@ database, separate app, separate domain from `thh-backend`. Talks to
 The single source of truth for schema and architecture is
 [`docs/SCHEMA.md`](./docs/SCHEMA.md). Every section reference below
 (`§3`, `§7.21`, `Arch-29`, etc.) maps into that doc.
+
+## Audit protocol (when user says "audit ...")
+
+When the user explicitly asks to audit a feature, change, or PR (their words: "audit", "review", "check the work"):
+
+1. **Load project context first via `graphify-out/`** — check `GRAPH_REPORT.md`, `wiki/index.md`, or `graph.json` for the relevant community/handlers. Cross-reference `docs/SCHEMA.md` for any §-tagged constraints. Do not grep blind.
+2. **Scope the audit to the feature, not the whole repo** — only audit the files and contracts the user pointed at, with the plan/task list they gave you as the reference for "what should exist."
+3. **Before asking for any commit, run a structural / architectural-level pass.** Skip syntax and cosmetic findings unless asked. Look for:
+   - Contract mismatches between LE ↔ THH-BE on the §9 integration endpoints.
+   - SCHEMA invariants violated (e.g. §7.21 fields written without §3 constraints honored).
+   - User-promised flows with no honest end-to-end path.
+   - Silent failure modes (queue accepted, downstream never ran).
+   - Plan deliverables claimed done but not actually wired (blueprint not registered, cron not scheduled, columns added but never written).
+
+   Surface findings as a ranked list with [BLOCKER/HIGH/MEDIUM] tags.
+4. **Never propose a commit until step 3 returns clean or the user has explicitly accepted the risks.**
 
 ## graphify knowledge graph (use this FIRST)
 
