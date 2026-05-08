@@ -23,6 +23,8 @@ from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
 from services.companies.models import Company
+from services.common.enums import CHANNELS
+from services.common.enums import get_label as get_channel_label
 from services.prospects.enums import FUNNEL_STAGES
 from services.prospects.enums import get_label as get_funnel_label
 from services.prospects.models import Prospect
@@ -240,6 +242,9 @@ def _stage_serialize(
         "last_outcome_label": get_label(CALL_OUTCOMES, last_outcome) if last_outcome is not None else None,
         "last_touched_at": prospect.last_touched_at,
         "next_callback_at": next_callback_at,
+        "source_channel": prospect.source_channel,
+        "source_channel_label": get_channel_label(CHANNELS, prospect.source_channel)
+            if prospect.source_channel is not None else None,
         "rnr_count": prospect.rnr_count,
     }
 

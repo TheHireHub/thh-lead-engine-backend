@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
@@ -52,6 +53,21 @@ router = APIRouter(prefix="/api/prospects", tags=["prospects"])
 # A callback (outcome=2) within this window of `now` flips `is_urgent` true
 # — drives the red follow-up pill on the Prospects list (BACKEND_CHANGES_PENDING #9b).
 _URGENT_WINDOW = timedelta(minutes=60)
+
+
+async def _ensure_owner_is_caller(db: AsyncSession, owner_user_id: int) -> None:
+    """Reject 422 if owner_user_id does not reference an active caller (role=4).
+
+    Ownership is the queue-work assignment, so only callers can hold it.
+    Admin/growth/bdr/sales/csm/viewer manage the queue but never work it.
+    NULL ownership is legal and bypasses this check at the call site.
+    """
+    target = await AdminUserCRUD.get_by_id(db, owner_user_id)
+    if target is None or target.role != ROLE_CALLER:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="owner_user_id must reference an active caller",
+        )
 
 
 def _serialize(p, owner_names: dict[int, str] | None = None) -> dict:
@@ -422,7 +438,8 @@ async def create_prospect(
     db: AsyncSession = Depends(get_db),
     user: AdminUser = Depends(require_internal_or_caller),
 ) -> dict:
-    # Arch-6 dedupe priority: LinkedIn URL > email > phone.
+    # Arch-6 v2 dedupe: LinkedIn URL OR email (phone excluded — corporate
+    # switchboards collapse colleagues into one prospect, see dedupe.py).
     duplicate = await find_existing(
         db,
         linkedin_url=payload.linkedin_url,
@@ -442,6 +459,12 @@ async def create_prospect(
     # it under the rep filter.
     if user.role == ROLE_CALLER:
         fields.setdefault("owner_user_id", user.id)
+    # owner_user_id must reference an active CALLER (role=4). Non-callers
+    # (admin, growth, bdr, sales, csm, viewer) own nothing — they manage
+    # the queue, they don't work it. NULL = unassigned (legal).
+    proposed_owner = fields.get("owner_user_id")
+    if proposed_owner is not None:
+        await _ensure_owner_is_caller(db, proposed_owner)
     prospect = await ProspectCRUD.create(
         db, created_by_user_id=user.id, **fields,
     )
@@ -472,8 +495,39 @@ async def update_prospect(
     prospect = await ProspectCRUD.get_by_id(db, prospect_id)
     if not prospect:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="prospect not found")
+
+    # Arch-6 v2 dedupe on identifier edits — if the new linkedin_url or
+    # email already belongs to a DIFFERENT prospect, refuse the edit
+    # (otherwise the user would unknowingly create two rows pointing at
+    # the same person, then we'd silently lose history when one of them
+    # was later deleted). Phone is excluded for the same reason as the
+    # CSV import: corporate switchboards are shared.
+    fields_in = payload.model_dump(exclude_unset=True)
+    # Reassign target validation: owner_user_id must be an active CALLER
+    # (role=4) or NULL (unassigned). Admins managing the queue can't pull
+    # leads onto themselves — they assign to callers. This is the
+    # canonical RBAC for ownership and replaces the FE-only filter.
+    if "owner_user_id" in fields_in and fields_in["owner_user_id"] is not None:
+        await _ensure_owner_is_caller(db, fields_in["owner_user_id"])
+    new_linkedin = fields_in.get("linkedin_url")
+    new_email = fields_in.get("email")
+    if new_linkedin or new_email:
+        clash = await find_existing(
+            db,
+            linkedin_url=new_linkedin if new_linkedin and new_linkedin != prospect.linkedin_url else None,
+            email=new_email if new_email and new_email != prospect.email else None,
+        )
+        if clash and clash.id != prospect.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "another lead already uses this LinkedIn or email",
+                    "id": clash.id,
+                },
+            )
+
     before = _audit_payload(prospect)
-    prospect = await ProspectCRUD.update(db, prospect, **payload.model_dump(exclude_unset=True))
+    prospect = await ProspectCRUD.update(db, prospect, **fields_in)
 
     # Recompute quality if title/company changed.
     score = await _quality_for_prospect(db, prospect)
@@ -654,3 +708,316 @@ async def delete_prospect(
         ip_address=request.client.host if request.client else None,
     )
     return ok(message="prospect deleted")
+
+
+# Bulk CSV import (Apollo-export shape — see services/integrations/apollo.py
+# for the live API path). Admin or caller drops a file in the FE "Import
+# CSV" panel; we parse, dedupe per row via Arch-6 (`find_existing`), create
+# any missing companies (matched case-insensitively by name), and report
+# {created, skipped, errors}. Caller-imported leads auto-assign owner+
+# created_by to the caller (same rule as the manual create_prospect path).
+_CSV_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "first_name": ("First Name", "first_name", "FirstName"),
+    "last_name": ("Last Name", "last_name", "LastName"),
+    "title": ("Title", "Job Title", "title"),
+    "company_name": ("Company Name", "Company", "company"),
+    "email": ("Email", "email", "Work Email", "Email Address"),
+    "linkedin_url": (
+        "Person Linkedin Url",
+        "Person LinkedIn Url",
+        "LinkedIn Url",
+        "Linkedin Url",
+        "linkedin_url",
+    ),
+    "phone": (
+        "Work Direct Phone",
+        "Work Phone",
+        "Mobile Phone",
+        "Mobile",
+        "Corporate Phone",
+        "Other Phone",
+        "Home Phone",
+        "Phone",
+        "phone",
+    ),
+    # Per-row source column. Apollo's contact export labels this "Primary
+    # Email Verification Source" (the value is usually "Apollo" itself —
+    # that's the platform that verified the email, so it doubles as the
+    # source signal). Other CSVs use "Source" / "Lead Source".
+    "source": (
+        "Primary Email Verification Source",
+        "Lead Source",
+        "Source",
+        "source",
+    ),
+}
+
+# Map free-text source column values to CHANNELS §6.3 ints. Lookup is
+# case-insensitive + ignores surrounding whitespace + dashes/underscores.
+# Anything unrecognised falls through to the default `source_channel`
+# form value (typically apollo when the importer is using the Apollo
+# CSV export).
+_SOURCE_TEXT_TO_CHANNEL: dict[str, int] = {
+    "cold email": 0,
+    "email": 0,
+    "linkedin": 1,
+    "linked in": 1,
+    "paid": 2,
+    "paid ads": 2,
+    "ads": 2,
+    "seo": 3,
+    "geo": 4,
+    "brand": 5,
+    "remarketing": 6,
+    "social": 7,
+    "wom": 8,
+    "word of mouth": 8,
+    "apollo": 9,
+    "warmly": 10,
+    "direct": 11,
+    "manual": 11,
+    "other": 12,
+}
+
+
+def _parse_source_text(raw: str | None, default: int) -> int:
+    """Map a free-text "source" column value to a CHANNELS int."""
+    if not raw:
+        return default
+    norm = raw.strip().lower().replace("_", " ").replace("-", " ")
+    norm = " ".join(norm.split())  # collapse whitespace
+    if not norm:
+        return default
+    return _SOURCE_TEXT_TO_CHANNEL.get(norm, default)
+
+
+# SharePoint personal share URLs (the `:x:/g/personal/<user>/<token>...`
+# variant) return 403 to anonymous fetch — the share token has to be
+# passed to `_layouts/15/download.aspx?share=<token>` instead. Detect
+# and rewrite so users can paste the URL straight from "Share" in
+# Excel-online without any extra dance.
+_SHAREPOINT_SHARE_RE = re.compile(
+    r"^(?P<host>https?://[^/]*sharepoint\.com)/:[a-z]:/g/personal/(?P<user>[^/]+)/(?P<token>[^/?#]+)",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_sharepoint_url(url: str) -> str:
+    m = _SHAREPOINT_SHARE_RE.match(url)
+    if not m:
+        return url
+    return (
+        f"{m.group('host')}/personal/{m.group('user')}"
+        f"/_layouts/15/download.aspx?share={m.group('token')}"
+    )
+
+
+def _pick(row: dict, key: str) -> str:
+    for col in _CSV_COLUMN_ALIASES[key]:
+        v = row.get(col)
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            return v
+    return ""
+
+
+@router.post("/import-csv")
+async def import_csv(
+    file: UploadFile | None = File(default=None),
+    url: str | None = Form(default=None),
+    # Optional fallback when neither the per-row source column nor a CSV
+    # default is present. None → defer to the Prospect model's column
+    # default (12 = "other"), which keeps source effectively empty until
+    # the CSV provides a real value.
+    source_channel: int | None = Form(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_internal_or_caller),
+) -> dict:
+    import csv as _csv
+    import io
+
+    import httpx
+
+    from services.companies.crud import CompanyCRUD
+    from services.prospects.dedupe import find_existing
+
+    # Either a multipart-uploaded file or a public URL pointing at a CSV
+    # (Google Sheets export / S3 / raw GitHub link). URL fetch is a 10s
+    # timeout — long enough for an Apollo "View as CSV" download but not
+    # long enough to hang the request indefinitely on a misconfigured host.
+    if file is not None and getattr(file, "filename", None):
+        raw_bytes = await file.read()
+    elif url:
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="url must be http(s)",
+            )
+        # SharePoint share URLs (the `:x:/g/personal/...` form) are 403
+        # for anonymous fetch — auto-rewrite to the public `download.aspx`
+        # variant so the user can paste the link straight from Excel-online.
+        fetch_url = _rewrite_sharepoint_url(url)
+        try:
+            async with httpx.AsyncClient(
+                timeout=20, follow_redirects=True
+            ) as client:
+                r = await client.get(fetch_url)
+                r.raise_for_status()
+                raw_bytes = r.content
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"could not fetch CSV from url: {exc}",
+            ) from exc
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="provide either `file` or `url`",
+        )
+
+    raw = raw_bytes.decode("utf-8-sig", errors="replace")
+    reader = _csv.DictReader(io.StringIO(raw))
+
+    # Round-robin auto-assign for non-caller imports (admin/growth/bdr).
+    # Caller imports go entirely to the importer (auto-route below).
+    # Empty caller pool → leads land unassigned and admin can reassign later.
+    rr_pool: list[int] = []
+    rr_idx = 0
+    if user.role != ROLE_CALLER:
+        active_callers = await AdminUserCRUD.list_all(db, role=ROLE_CALLER)
+        rr_pool = [c.id for c in active_callers]
+
+    created = 0
+    skipped = 0
+    errors: list[dict] = []
+    last_idx = 1
+    assigned_counts: dict[int, int] = {}
+
+    for idx, row in enumerate(reader, start=2):  # row 1 = header
+        last_idx = idx
+        try:
+            first_name = _pick(row, "first_name")
+            last_name = _pick(row, "last_name") or None
+            title = _pick(row, "title") or None
+            company_name = _pick(row, "company_name")
+            email = (_pick(row, "email") or "").lower() or None
+            linkedin_url = _pick(row, "linkedin_url") or None
+            phone = _pick(row, "phone") or None
+
+            if not first_name:
+                errors.append({"row": idx, "reason": "missing first_name"})
+                continue
+            if not (email or phone or linkedin_url):
+                errors.append({"row": idx, "reason": "no email/phone/linkedin"})
+                continue
+
+            # Per-row source: if the CSV has a recognised source column,
+            # use that; otherwise fall back to the form `source_channel`,
+            # otherwise leave None so the model default ("other") applies.
+            row_source = _parse_source_text(_pick(row, "source"), source_channel)
+
+            existing = await find_existing(
+                db, linkedin_url=linkedin_url, email=email, phone=phone
+            )
+            if existing:
+                skipped += 1
+                continue
+
+            company_id: int | None = None
+            if company_name:
+                # Case-insensitive lookup by name (no domain in Apollo
+                # contact export). q= does an ilike match on name+domain;
+                # we narrow to exact-equal-lower so "Yulu" doesn't catch
+                # "Yulu Bikes" by accident.
+                candidates = await CompanyCRUD.list_all(db, q=company_name, limit=10)
+                target = company_name.strip().lower()
+                match = next(
+                    (c for c in candidates if (c.name or "").strip().lower() == target),
+                    None,
+                )
+                if match:
+                    company_id = match.id
+                else:
+                    new_co = await CompanyCRUD.create(
+                        db,
+                        name=company_name,
+                        source=1,  # CompanySource §6.4 — manual
+                    )
+                    company_id = new_co.id
+
+            # Ownership rules on import:
+            # - caller importer → all rows go to the caller (auto-route).
+            # - admin/growth/bdr → round-robin across active callers
+            #   (rr_pool). Empty pool → owner stays None and admin can
+            #   reassign manually later. Round-robin keeps assignment fair
+            #   across the team without needing a separate "distribute"
+            #   button.
+            if user.role == ROLE_CALLER:
+                row_owner: int | None = user.id
+            elif rr_pool:
+                row_owner = rr_pool[rr_idx % len(rr_pool)]
+                rr_idx += 1
+            else:
+                row_owner = None
+            create_kwargs = {
+                "first_name": first_name,
+                "last_name": last_name,
+                "title": title,
+                "company_id": company_id,
+                "email": email,
+                "phone": phone,
+                "linkedin_url": linkedin_url,
+                "stage": 0,
+                "created_by_user_id": user.id,
+                "owner_user_id": row_owner,
+            }
+            # Only pass source_channel if we resolved one — otherwise let
+            # SQLAlchemy use the column default (12 = "other"). User asked
+            # for "no value when CSV doesn't have one" rather than forcing
+            # a guessed channel like Apollo.
+            if row_source is not None:
+                create_kwargs["source_channel"] = row_source
+            await ProspectCRUD.create(db, **create_kwargs)
+            created += 1
+            if row_owner is not None:
+                assigned_counts[row_owner] = assigned_counts.get(row_owner, 0) + 1
+        except Exception as exc:
+            errors.append({"row": idx, "reason": str(exc)[:200]})
+            await db.rollback()
+
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="prospect",
+        entity_id=0,
+        action="import_csv",
+        after_json={"created": created, "skipped": skipped, "error_count": len(errors)},
+    )
+
+    # Resolve caller ids → display names so the FE can show the
+    # round-robin distribution back to the user (e.g. "Alice 4, Bob 3").
+    # Append #id when two callers share a display name so counts don't
+    # collapse into one bucket — keeping the dict shape unique-keyed and
+    # the FE renderer trivial.
+    assigned_names: dict[str, int] = {}
+    if assigned_counts:
+        names = await AdminUserCRUD.names_by_ids(db, list(assigned_counts.keys()))
+        used: set[str] = set()
+        for uid, n in assigned_counts.items():
+            base = names.get(uid) or f"#{uid}"
+            label = base if base not in used else f"{base} #{uid}"
+            used.add(label)
+            assigned_names[label] = n
+    return ok(
+        {
+            "created": created,
+            "skipped": skipped,
+            "errors": errors[:50],  # cap so we don't ship 5000 dupes' rows back
+            "error_count": len(errors),
+            "total_rows": max(0, last_idx - 1),
+            "assigned_to": assigned_names,
+        },
+        message=f"imported {created} leads ({skipped} duplicates, {len(errors)} errors)",
+    )
