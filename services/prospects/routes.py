@@ -55,6 +55,44 @@ router = APIRouter(prefix="/api/prospects", tags=["prospects"])
 _URGENT_WINDOW = timedelta(minutes=60)
 
 
+async def _company_sticky_owner(
+    db: AsyncSession, company_id: int, valid_caller_ids: list[int]
+) -> int | None:
+    """Return the caller this company is currently 'attached' to, if any.
+
+    Semantic: majority owner of the company's active prospects, with
+    most-recent `updated_at` as tiebreak. A one-off manual reassign on a
+    single lead doesn't flip the company; admin must bulk-reassign past
+    50% to shift sticky. The owner must still be in the active-caller
+    pool — if deactivated, sticky doesn't apply and the row falls through
+    to round-robin.
+    """
+    from sqlalchemy import func as _func
+    from sqlalchemy import select as _select
+
+    from .models import Prospect as _P
+
+    stmt = (
+        _select(_P.owner_user_id, _func.count(_P.id), _func.max(_P.updated_at))
+        .where(
+            _P.company_id == company_id,
+            _P.owner_user_id.is_not(None),
+            _P.deleted_at.is_(None),
+        )
+        .group_by(_P.owner_user_id)
+        .order_by(_func.count(_P.id).desc(), _func.max(_P.updated_at).desc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    row = result.first()
+    if row is None:
+        return None
+    owner = row[0]
+    if valid_caller_ids and owner not in valid_caller_ids:
+        return None
+    return int(owner)
+
+
 async def _ensure_owner_is_caller(db: AsyncSession, owner_user_id: int) -> None:
     """Reject 422 if owner_user_id does not reference an active caller (role=4).
 
@@ -489,6 +527,7 @@ async def update_prospect(
     prospect_id: int,
     payload: ProspectUpdate,
     request: Request,
+    force: bool = False,
     db: AsyncSession = Depends(get_db),
     user: AdminUser = Depends(require_growth_or_bdr),
 ) -> dict:
@@ -509,6 +548,33 @@ async def update_prospect(
     # canonical RBAC for ownership and replaces the FE-only filter.
     if "owner_user_id" in fields_in and fields_in["owner_user_id"] is not None:
         await _ensure_owner_is_caller(db, fields_in["owner_user_id"])
+
+    # Mid-call guardrail: if the lead was touched in the last 5 minutes
+    # the previous owner is likely still on the phone or finishing notes.
+    # Reassigning right now silently yanks the lead from their drawer,
+    # leaving the call attribution split. Reject 409 unless `?force=true`
+    # so the admin has to consciously override.
+    if (
+        "owner_user_id" in fields_in
+        and fields_in["owner_user_id"] != prospect.owner_user_id
+        and not force
+    ):
+        if prospect.last_touched_at is not None:
+            staleness = datetime.now(timezone.utc) - prospect.last_touched_at.replace(
+                tzinfo=timezone.utc
+            )
+            if staleness < timedelta(minutes=5):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "mid_call_lock",
+                        "message": (
+                            "lead was touched in the last 5 min — current owner "
+                            "may be mid-call. Pass `?force=true` to override."
+                        ),
+                        "last_touched_at": prospect.last_touched_at.isoformat(),
+                    },
+                )
     new_linkedin = fields_in.get("linkedin_url")
     new_email = fields_in.get("email")
     if new_linkedin or new_email:
@@ -894,6 +960,12 @@ async def import_csv(
     errors: list[dict] = []
     last_idx = 1
     assigned_counts: dict[int, int] = {}
+    # Company-sticky ownership cache. If a company already has at least
+    # one (non-deleted) prospect with an owner, every new lead for that
+    # company in this import goes to the same caller — overriding RR.
+    # Maps `company_id → caller_id`. None means "looked up, no owner",
+    # so we don't requery for the same company twice.
+    company_owner_cache: dict[int, int | None] = {}
 
     for idx, row in enumerate(reader, start=2):  # row 1 = header
         last_idx = idx
@@ -947,20 +1019,32 @@ async def import_csv(
                     )
                     company_id = new_co.id
 
-            # Ownership rules on import:
-            # - caller importer → all rows go to the caller (auto-route).
-            # - admin/growth/bdr → round-robin across active callers
-            #   (rr_pool). Empty pool → owner stays None and admin can
-            #   reassign manually later. Round-robin keeps assignment fair
-            #   across the team without needing a separate "distribute"
-            #   button.
+            # Ownership rules on import (priority order):
+            # 1. Caller importer → all rows go to the caller (auto-route).
+            # 2. Company-sticky → if any prospect for this company is
+            #    already owned by an active caller, route the new lead
+            #    to that owner (overrides RR). Keeps a single rep
+            #    accountable for a company until manually reassigned.
+            # 3. Round-robin across active callers (rr_pool).
+            # 4. Empty pool → owner stays None.
+            row_owner: int | None
             if user.role == ROLE_CALLER:
-                row_owner: int | None = user.id
-            elif rr_pool:
-                row_owner = rr_pool[rr_idx % len(rr_pool)]
-                rr_idx += 1
+                row_owner = user.id
             else:
-                row_owner = None
+                sticky = None
+                if company_id is not None:
+                    if company_id not in company_owner_cache:
+                        company_owner_cache[company_id] = (
+                            await _company_sticky_owner(db, company_id, rr_pool)
+                        )
+                    sticky = company_owner_cache[company_id]
+                if sticky is not None:
+                    row_owner = sticky
+                elif rr_pool:
+                    row_owner = rr_pool[rr_idx % len(rr_pool)]
+                    rr_idx += 1
+                else:
+                    row_owner = None
             create_kwargs = {
                 "first_name": first_name,
                 "last_name": last_name,
@@ -983,6 +1067,12 @@ async def import_csv(
             created += 1
             if row_owner is not None:
                 assigned_counts[row_owner] = assigned_counts.get(row_owner, 0) + 1
+                # Keep brand-new companies sticky within this import: row 1
+                # of a fresh company has no prior owner, so it falls
+                # through to RR; subsequent rows of the same company
+                # should ride the same caller, not advance RR again.
+                if company_id is not None and company_owner_cache.get(company_id) is None:
+                    company_owner_cache[company_id] = row_owner
         except Exception as exc:
             errors.append({"row": idx, "reason": str(exc)[:200]})
             await db.rollback()

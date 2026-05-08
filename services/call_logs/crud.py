@@ -23,14 +23,85 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.audit.crud import AuditLogCRUD
-from services.prospects.models import Prospect
+from services.common.tz import business_offset_str
+from services.prospects.models import Prospect, ProspectStageHistory
 
 from .models import CallLog
+
+
+def _called_at_local_date():
+    """Render `func.date(called_at)` interpreted as the business-local
+    calendar date.
+
+    Production assumption: MySQL session `time_zone = SYSTEM` and the
+    DB host runs on the business TZ (IST in our case), so `called_at`
+    is stored as a naive timestamp already in business-local time. A
+    plain `func.date()` therefore yields the local calendar day — no
+    `CONVERT_TZ` needed. If you ever switch the DB host to UTC (which
+    is the more "correct" pattern), uncomment the CONVERT_TZ form below
+    and `today_business()` will continue to align with stored dates.
+    """
+    # _ = business_offset_str  # reserved for the UTC-storage variant
+    return func.date(CallLog.called_at)
 
 
 # Stages excluded from the Caller "Next" pool (§6.2):
 #   2 converted | 3 lost | 4 unsubscribed
 EXCLUDED_STAGES = (2, 3, 4)
+
+
+def _next_open_callback_subq(*, caller_user_id: int | None = None):
+    """Correlated subquery returning the next OPEN `callback_at` for a
+    prospect. Used in queue ORDER BY so callback-pending leads surface
+    at the top of the queue — they're commitments, not done items.
+
+    "Open" means: the most recent callback hasn't been resolved by a
+    later outcome. For outcome=2 (call_back), resolution outcomes are
+    1 not_interested / 4 demo_scheduled / 5 demo_attended / 6 demo_no_show.
+    For outcome=4 (demo_scheduled), resolution is just 5 / 6. RNR /
+    follow_up / another call_back DON'T resolve a callback — they're
+    mid-flight attempts.
+
+    The lookup is intentionally NOT scoped by caller. A callback is a
+    commitment on the PROSPECT, not on the rep — if admin logs a
+    callback for caller A's prospect, caller A still owes that call.
+    Reassigning a lead carries the open callback to the new owner.
+
+    `caller_user_id` is accepted for API symmetry but currently unused
+    (kept so callers don't churn when we add per-team scoping later).
+    """
+    del caller_user_id
+    from sqlalchemy import and_, exists, select as _select
+
+    cl = CallLog.__table__.alias("cl_open")
+    cl2 = CallLog.__table__.alias("cl_open_kill")
+
+    # Callback-bearing outcomes: call_back (2), follow_up (3),
+    # demo_scheduled (4). Each carries a callback_at and is treated as
+    # an open commitment until a resolving outcome lands.
+    base = _select(func.min(cl.c.callback_at)).where(
+        cl.c.prospect_id == Prospect.id,
+        cl.c.callback_at.is_not(None),
+        cl.c.outcome.in_((2, 3, 4)),
+    )
+    resolving_for_2 = (1, 4, 5, 6)
+    resolving_for_3 = (1, 4, 5, 6)
+    resolving_for_4 = (5, 6)
+    kill = (
+        _select(cl2.c.id)
+        .where(
+            cl2.c.prospect_id == cl.c.prospect_id,
+            cl2.c.called_at > cl.c.called_at,
+            or_(
+                and_(cl.c.outcome == 2, cl2.c.outcome.in_(resolving_for_2)),
+                and_(cl.c.outcome == 3, cl2.c.outcome.in_(resolving_for_3)),
+                and_(cl.c.outcome == 4, cl2.c.outcome.in_(resolving_for_4)),
+            ),
+        )
+        .correlate(cl)
+    )
+    base = base.where(~exists(kill))
+    return base.correlate(Prospect).scalar_subquery()
 
 
 class CallLogCRUD:
@@ -130,7 +201,8 @@ class CallLogCRUD:
             prospect.last_touched_at = datetime.now(timezone.utc)
             prospect.touch_count = (prospect.touch_count or 0) + 1
 
-            if fields.get("outcome") == 0:  # rnr
+            outcome = fields.get("outcome")
+            if outcome == 0:  # rnr
                 prospect.rnr_count = (prospect.rnr_count or 0) + 1
                 if prospect.rnr_count >= 3:
                     # P5 PENDING (§14): decide whether to set a milestone
@@ -144,6 +216,14 @@ class CallLogCRUD:
                         actor_user_id=None,
                         after_json={"rnr_count": prospect.rnr_count},
                     )
+            # NOTE: previously `not_interested` (outcome=1) auto-flipped
+            # the prospect's stage to LOST, which dropped the row from
+            # the queue and confused callers ("the lead I just logged
+            # disappeared from BlackBuck"). Reverted on user request:
+            # the lead now stays in queue with `last_outcome=not_interested`
+            # rendered as a red chip on the row, and the explicit
+            # "Mark Unsubscribed / Lost" buttons in the drawer remain the
+            # only way to retire a lead. (audit 2026-05-08).
 
         await db.commit()
         await db.refresh(log)
@@ -154,21 +234,14 @@ class CallLogCRUD:
         db: AsyncSession, caller_user_id: int
     ) -> Optional[Prospect]:
         """
-        Pick the next prospect this caller should call.
-
-        Rules (Schema doc §5.5):
-        - Owned by this caller (prospects.owner_user_id == caller_user_id) OR
-          created by this caller.
-        - Not deleted.
-        - Stage NOT IN (converted, lost, unsubscribed).
-        - Sort by last_touched_at ascending NULLs first (never-touched prospects
-          surface before stale ones). Recently-RNR'd leads sort last because
-          their last_touched_at just got bumped, so they naturally fall to the
-          bottom — but they STAY visible (caller decides whether to retry).
+        Pick the next prospect this caller should call. Order matches
+        `queue_for_caller` exactly so "Next" ≡ top-of-queue:
+          1. Open callbacks (call_back / follow_up / demo_scheduled) by
+             callback_at ASC — overdue surfaces first.
+          2. Never-touched.
+          3. Oldest touched.
         """
-        # MySQL doesn't support NULLS FIRST — emulate with two-level sort:
-        # rows where last_touched_at IS NULL come first, then by ASC.
-        # Caller scope: assigned-to-me OR added-by-me (§5.5 BDR isolation).
+        next_cb = _next_open_callback_subq()
         stmt = (
             select(Prospect)
             .where(
@@ -180,6 +253,8 @@ class CallLogCRUD:
                 Prospect.stage.not_in(EXCLUDED_STAGES),
             )
             .order_by(
+                next_cb.is_(None).asc(),
+                next_cb.asc(),
                 Prospect.last_touched_at.is_(None).desc(),
                 Prospect.last_touched_at.asc(),
             )
@@ -213,7 +288,7 @@ class CallLogCRUD:
         """
         stmt = select(func.count(func.distinct(CallLog.prospect_id))).where(
             CallLog.caller_user_id == caller_user_id,
-            func.date(CallLog.called_at) == day,
+            _called_at_local_date() == day,
         )
         result = await db.execute(stmt)
         return int(result.scalar_one() or 0)
@@ -231,12 +306,35 @@ class CallLogCRUD:
             select(CallLog.outcome, func.count(CallLog.id))
             .where(
                 CallLog.caller_user_id == caller_user_id,
-                func.date(CallLog.called_at) == day,
+                _called_at_local_date() == day,
             )
             .group_by(CallLog.outcome)
         )
         result = await db.execute(stmt)
         return {int(outcome): int(cnt or 0) for outcome, cnt in result.all()}
+
+    @staticmethod
+    async def calls_on_owned_count_in_range(
+        db: AsyncSession, *, owner_user_id: int, day_from: date, day_to: date
+    ) -> int:
+        """Count UNIQUE prospects called in `[day_from, day_to]` whose
+        prospect.owner_user_id is currently `owner_user_id` — regardless
+        of which caller logged the call. Powers the "queue activity"
+        KPI which surfaces calls inherited via reassign. Distinct from
+        `calls_count_in_range` (which is per-caller_user_id).
+        """
+        stmt = (
+            select(_called_at_local_date(), func.count(func.distinct(CallLog.prospect_id)))
+            .join(Prospect, Prospect.id == CallLog.prospect_id)
+            .where(
+                Prospect.owner_user_id == owner_user_id,
+                _called_at_local_date() >= day_from,
+                _called_at_local_date() <= day_to,
+            )
+            .group_by(_called_at_local_date())
+        )
+        result = await db.execute(stmt)
+        return int(sum(int(cnt or 0) for _d, cnt in result.all()))
 
     @staticmethod
     async def calls_count_in_range(
@@ -249,13 +347,13 @@ class CallLogCRUD:
         what a manager wants to see when summing daily targets across a span.
         """
         stmt = (
-            select(func.date(CallLog.called_at), func.count(func.distinct(CallLog.prospect_id)))
+            select(_called_at_local_date(), func.count(func.distinct(CallLog.prospect_id)))
             .where(
                 CallLog.caller_user_id == caller_user_id,
-                func.date(CallLog.called_at) >= day_from,
-                func.date(CallLog.called_at) <= day_to,
+                _called_at_local_date() >= day_from,
+                _called_at_local_date() <= day_to,
             )
-            .group_by(func.date(CallLog.called_at))
+            .group_by(_called_at_local_date())
         )
         result = await db.execute(stmt)
         return int(sum(int(cnt or 0) for _d, cnt in result.all()))
@@ -322,8 +420,8 @@ class CallLogCRUD:
             )
             .where(
                 CallLog.caller_user_id == caller_user_id,
-                func.date(CallLog.called_at) >= day_from,
-                func.date(CallLog.called_at) <= day_to,
+                _called_at_local_date() >= day_from,
+                _called_at_local_date() <= day_to,
             )
             .group_by(CallLog.outcome)
         )
@@ -366,14 +464,22 @@ class CallLogCRUD:
         db: AsyncSession,
         *,
         caller_user_id: int,
-        limit: int = 100,
+        limit: int = 2000,
         offset: int = 0,
     ) -> list[Prospect]:
         """
-        Eligible call-queue rows for this caller, ordered the same way
-        `next_prospect_for_caller` picks: never-touched first (NULL
-        last_touched_at), then oldest touched.
+        Eligible call-queue rows for this caller. Order:
+          1. Open-callback leads first (caller scheduled a call_back/demo
+             that hasn't been resolved by a later 1/4/5/6 outcome) sorted
+             by callback_at ASC — overdue/soonest at top so the caller
+             never loses sight of a lead they promised to ring back.
+          2. Never-touched leads (NULL last_touched_at).
+          3. Other touched leads, oldest first.
+
+        Default limit = 500 (most callers' personal queue fits well
+        under this). Pagination available for tenants that grow past it.
         """
+        next_cb = _next_open_callback_subq(caller_user_id=caller_user_id)
         stmt = (
             select(Prospect)
             .where(
@@ -385,6 +491,8 @@ class CallLogCRUD:
                 Prospect.stage.not_in(EXCLUDED_STAGES),
             )
             .order_by(
+                next_cb.is_(None).asc(),  # has callback first (False sorts before True)
+                next_cb.asc(),  # soonest/overdue first
                 Prospect.last_touched_at.is_(None).desc(),
                 Prospect.last_touched_at.asc(),
             )
@@ -409,8 +517,12 @@ class CallLogCRUD:
 
     @staticmethod
     async def queue_all(
-        db: AsyncSession, *, limit: int = 100, offset: int = 0
+        db: AsyncSession, *, limit: int = 500, offset: int = 0
     ) -> list[Prospect]:
+        # Same ordering rule as `queue_for_caller`: open callbacks first
+        # (across all callers in admin "All" mode), then never-touched,
+        # then oldest touched. Default limit raised to 500 to match.
+        next_cb = _next_open_callback_subq(caller_user_id=None)
         stmt = (
             select(Prospect)
             .where(
@@ -418,6 +530,8 @@ class CallLogCRUD:
                 Prospect.stage.not_in(EXCLUDED_STAGES),
             )
             .order_by(
+                next_cb.is_(None).asc(),
+                next_cb.asc(),
                 Prospect.last_touched_at.is_(None).desc(),
                 Prospect.last_touched_at.asc(),
             )
@@ -435,14 +549,14 @@ class CallLogCRUD:
         stmt = (
             select(
                 CallLog.caller_user_id,
-                func.date(CallLog.called_at),
+                _called_at_local_date(),
                 func.count(func.distinct(CallLog.prospect_id)),
             )
             .where(
-                func.date(CallLog.called_at) >= day_from,
-                func.date(CallLog.called_at) <= day_to,
+                _called_at_local_date() >= day_from,
+                _called_at_local_date() <= day_to,
             )
-            .group_by(CallLog.caller_user_id, func.date(CallLog.called_at))
+            .group_by(CallLog.caller_user_id, _called_at_local_date())
         )
         result = await db.execute(stmt)
         return int(sum(int(cnt or 0) for _u, _d, cnt in result.all()))
@@ -491,8 +605,8 @@ class CallLogCRUD:
                 func.count(func.distinct(callback_open_pid)).label("callback_open"),
             )
             .where(
-                func.date(CallLog.called_at) >= day_from,
-                func.date(CallLog.called_at) <= day_to,
+                _called_at_local_date() >= day_from,
+                _called_at_local_date() <= day_to,
             )
             .group_by(CallLog.outcome)
         )

@@ -72,6 +72,15 @@ class DailyStatsOut(BaseModel):
     date_from: date_t
     date_to: date_t
     calls_today: int = Field(description="UNIQUE prospects dialled in [date_from, date_to]")
+    queue_calls_today: int = Field(
+        default=0,
+        description=(
+            "UNIQUE prospects on the rep's CURRENTLY-OWNED queue that received "
+            "a call in [date_from, date_to], regardless of who logged the call. "
+            "Surfaces activity inherited via reassign so KPI doesn't show 0 "
+            "after a hand-off."
+        ),
+    )
     target: int = Field(description="caller's daily_call_target × number of days in range")
     in_queue: int = Field(description="prospects still eligible to call right now")
     by_outcome: dict[str, int] = Field(

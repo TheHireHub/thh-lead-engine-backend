@@ -22,6 +22,7 @@ from services.admin_users.deps import (
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
+from services.common.tz import today_business
 from services.companies.models import Company
 from services.common.enums import CHANNELS
 from services.common.enums import get_label as get_channel_label
@@ -59,10 +60,11 @@ async def _latest_outcome_map(
 ) -> dict[int, tuple[int, Optional[datetime]]]:
     """For each prospect, return `(latest_outcome, latest_callback_at)`.
 
-    `callback_at` is only carried when the latest outcome is an open state
-    (`2` call_back or `4` demo_scheduled) — for everything else we return
-    None so the queue's "Follow-up Time" column renders "—" instead of
-    falsely marking `last_touched_at` as overdue.
+    `callback_at` is only carried when the latest outcome is an open
+    commitment (`2` call_back / `3` follow_up / `4` demo_scheduled) —
+    for everything else we return None so the queue's "Follow-up Time"
+    column renders "—" instead of falsely marking `last_touched_at` as
+    overdue.
     """
     if not prospect_ids:
         return {}
@@ -87,7 +89,7 @@ async def _latest_outcome_map(
     out: dict[int, tuple[int, Optional[datetime]]] = {}
     for pid, outcome, callback_at in result.all():
         o = int(outcome)
-        cb = callback_at if o in (2, 4) else None
+        cb = callback_at if o in (2, 3, 4) else None
         out[int(pid)] = (o, cb)
     return out
 
@@ -274,7 +276,7 @@ async def daily_stats(
     `owner_user_id` defaults to current user; only admin may inspect
     others (avoid cross-rep snooping per BUG-016).
     """
-    today = datetime.now(timezone.utc).date()
+    today = today_business()
     if date_from is not None or date_to is not None:
         # Range mode — fall back individually if only one bound was given.
         d_from = date_from or date_to or today
@@ -294,10 +296,14 @@ async def daily_stats(
     # scaled by the number of active callers × days. Non-admin callers
     # always default to themselves (cross-rep snoop already 403s below).
     aggregate = owner_user_id is None and user.role == 0
+    queue_calls_today = 0
     if aggregate:
         calls_today = await CallLogCRUD.calls_count_all_in_range(
             db, day_from=d_from, day_to=d_to
         )
+        # Org-wide aggregate: queue_calls_today is the same as calls_today
+        # since "owned by anyone" == "all calls".
+        queue_calls_today = calls_today
         outcomes_raw = await CallLogCRUD.outcomes_all_in_range(
             db, day_from=d_from, day_to=d_to
         )
@@ -316,6 +322,9 @@ async def daily_stats(
             raise HTTPException(status_code=404, detail="caller not found")
         calls_today = await CallLogCRUD.calls_count_in_range(
             db, caller_user_id=target_user_id, day_from=d_from, day_to=d_to
+        )
+        queue_calls_today = await CallLogCRUD.calls_on_owned_count_in_range(
+            db, owner_user_id=target_user_id, day_from=d_from, day_to=d_to
         )
         outcomes_raw = await CallLogCRUD.outcomes_in_range(
             db, caller_user_id=target_user_id, day_from=d_from, day_to=d_to
@@ -338,6 +347,7 @@ async def daily_stats(
         date_from=d_from,
         date_to=d_to,
         calls_today=calls_today,
+        queue_calls_today=queue_calls_today,
         target=target,
         in_queue=in_queue,
         by_outcome=by_outcome,
@@ -349,7 +359,7 @@ async def daily_stats(
 async def call_queue(
     owner_user_id: Optional[int] = None,
     date: Optional[date_t] = None,
-    limit: int = 100,
+    limit: int = 2000,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
     # Auth-only: same reasoning as /daily-stats — caller must read their
@@ -365,7 +375,7 @@ async def call_queue(
     request their own queue.
     """
     if date is None:
-        date = datetime.now(timezone.utc).date()
+        date = today_business()
 
     # Admin "All" aggregate mode (mirrors /daily-stats): admin with no rep
     # filter selected → org-wide queue across every eligible prospect.

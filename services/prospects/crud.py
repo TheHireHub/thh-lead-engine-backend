@@ -141,9 +141,16 @@ class ProspectCRUD:
         reason: Optional[str] = None,
         changed_by_user_id: Optional[int] = None,
     ) -> Prospect:
-        """Atomic stage update + history row + audit row + converted_at milestone."""
+        """Atomic stage update + history row + audit row + converted_at milestone.
+
+        Also bumps `last_touched_at` so a manual stage change rotates the
+        prospect off the never-touched section of the queue. Without
+        this, a caller marking a lead "curious" via the drawer would
+        reappear at the top on the next refresh as if untouched.
+        """
         from_stage = prospect.stage
         prospect.stage = to_stage
+        prospect.last_touched_at = datetime.now(timezone.utc)
         if to_stage == _STAGE_CONVERTED and prospect.converted_at is None:
             prospect.converted_at = datetime.now(timezone.utc)
         db.add(
