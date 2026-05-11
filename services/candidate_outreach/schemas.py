@@ -62,6 +62,12 @@ class IngestPayload(BaseModel):
     # better, so we encourage HH-BE to send it.
     dedup_key: Optional[str] = Field(default=None, max_length=64)
 
+    # Optional status hint from HH-BE. None → default 0 ("initiated") on
+    # create, no-op on duplicate dedup_key. Set to 1 ("engaged") on the
+    # send-success leg so the same dedup_key advances the existing row
+    # without needing a separate PATCH endpoint. See OUTREACH_STATUSES §6.30.
+    status: Optional[int] = Field(default=None, ge=0, le=3)
+
 
 # ─── Admin mutations (cookie auth) ──────────────────────────────────────
 

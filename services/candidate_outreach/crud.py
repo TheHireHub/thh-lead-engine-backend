@@ -128,6 +128,26 @@ class CandidateOutreachCRUD:
         )
         existing_row = existing.scalar_one_or_none()
         if existing_row is not None:
+            # Two-stage flow: HH-BE re-posts with the same dedup_key on
+            # send-success and includes `status=1`. Bump the existing row's
+            # status without creating a new event.
+            #
+            # Hardening: only advance forward (incoming > existing). This
+            # protects against (a) a stray /initiate re-click demoting a
+            # row that's already at engaged/hired, and (b) any future
+            # caller that accidentally sends a lower status. Admin manual
+            # moves remain authoritative — auto-pushes never undo them.
+            incoming_status = getattr(payload, "status", None)
+            if (
+                incoming_status is not None
+                and int(incoming_status) > int(existing_row.status)
+            ):
+                existing_row.status = int(incoming_status)
+                # commit() (not just flush()) — this branch returns early,
+                # so it bypasses the bottom-of-function commit that the
+                # new-row path uses. Without this, the UPDATE rolls back
+                # when the AsyncSession exits (autocommit=False).
+                await db.commit()
             return existing_row, False
 
         prospect_id = await CandidateOutreachCRUD._resolve_prospect_id(
@@ -152,7 +172,10 @@ class CandidateOutreachCRUD:
             ),
             channel=payload.channel,
             candidate_count=len(payload.candidates),
-            status=0,  # initiated
+            # Honour an explicit status hint (e.g. HH-BE seeds status=1
+            # directly on send when no prior initiate-row exists). Default
+            # to 0 = initiated. See OUTREACH_STATUSES §6.30.
+            status=int(getattr(payload, "status", None) or 0),
             dedup_key=dedup_key,
         )
         db.add(outreach)
