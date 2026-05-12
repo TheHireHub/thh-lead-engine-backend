@@ -170,11 +170,15 @@ class ProspectCompanyJobBoard(Base):
 
     __tablename__ = "prospect_company_job_boards"
     __table_args__ = (
-        UniqueConstraint("prospect_company_job_id", "board", name="uk_pcjb_job_board"),
+        # Multiple rows per (job, board) are intentional: each row is one
+        # posting attempt. After a halt, CSM can post the same board again
+        # and a new row is created. Latest row's status drives the live
+        # chip on the Performance table.
         Index("idx_pcjb_status", "status"),
         Index("idx_pcjb_board", "board"),
         Index("idx_pcjb_posted_at", "posted_at"),
         Index("idx_pcjb_deleted_at", "deleted_at"),
+        Index("idx_pcjb_job_board", "prospect_company_job_id", "board"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
