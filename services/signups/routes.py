@@ -18,6 +18,7 @@ from services.campaigns.crud import CampaignEventCRUD
 from services.candidate_outreach.auth import require_service_token
 from services.common.envelope import ok
 from services.companies.crud import CompanyCRUD
+from services.companies.models import Company
 from services.integrations import telegram, thh_backend
 from services.landing_pages.crud import (
     LandingPageVariantCRUD,
@@ -98,6 +99,79 @@ async def list_signups(
         offset=offset,
     )
     return ok([_serialize(s) for s in rows])
+
+
+@router.get("/{signup_id}")
+async def get_signup_detail(
+    signup_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_internal),
+) -> dict:
+    """Detail view used by the FE drawer.
+
+    Joins the signup -> prospect -> company chain so the FE renders a full
+    lead picture in one fetch: contact info, milestone timestamps, company
+    profile, and the original event payload (touch count, source slug,
+    enrichment overflow). Returns 404 if the signup row is missing.
+    """
+    row = await SignupCRUD.get_by_id(db, signup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="signup not found")
+
+    prospect: Optional[Prospect] = None
+    if row.prospect_id:
+        prospect_result = await db.execute(
+            select(Prospect).where(Prospect.id == row.prospect_id)
+        )
+        prospect = prospect_result.scalar_one_or_none()
+
+    company: Optional[Company] = None
+    if prospect and prospect.company_id:
+        company_result = await db.execute(
+            select(Company).where(Company.id == prospect.company_id)
+        )
+        company = company_result.scalar_one_or_none()
+
+    signup_dict = _serialize(row)
+    detail = {
+        "signup": signup_dict,
+        "prospect": None,
+        "company": None,
+    }
+    if prospect:
+        detail["prospect"] = {
+            "id": prospect.id,
+            "first_name": prospect.first_name,
+            "last_name": prospect.last_name,
+            "email": prospect.email,
+            "phone": prospect.phone,
+            "linkedin_url": prospect.linkedin_url,
+            "stage": prospect.stage,
+            "source_channel": prospect.source_channel,
+            "thh_user_id": prospect.thh_user_id,
+            "company_id": prospect.company_id,
+            "registered_at": prospect.registered_at.isoformat() if prospect.registered_at else None,
+            "first_job_created_at": prospect.first_job_created_at.isoformat() if prospect.first_job_created_at else None,
+            "jobs_created_count": prospect.jobs_created_count,
+            "demo_booked_at": prospect.demo_booked_at.isoformat() if prospect.demo_booked_at else None,
+            "first_applicant_received_at": prospect.first_applicant_received_at.isoformat() if prospect.first_applicant_received_at else None,
+            "applicants_received_count": prospect.applicants_received_count,
+            "created_at": prospect.created_at.isoformat() if prospect.created_at else None,
+        }
+    if company:
+        detail["company"] = {
+            "id": company.id,
+            "name": company.name,
+            "domain": company.domain,
+            "linkedin_url": company.linkedin_url,
+            "industry": company.industry,
+            "size": company.size,
+            "revenue_range": company.revenue_range,
+            "funding_stage": company.funding_stage,
+            "source": company.source,
+            "enriched_at": company.enriched_at.isoformat() if company.enriched_at else None,
+        }
+    return ok(detail)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
