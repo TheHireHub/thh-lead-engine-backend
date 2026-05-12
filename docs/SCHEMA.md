@@ -353,6 +353,7 @@ This section is the single source of truth for every value mapping. Application 
 | 10  | warmly      |
 | 11  | direct      |
 | 12  | other       |
+| 13  | hh_signup   |
 
 
 ### 6.4 Company source (`companies.source`)
@@ -449,13 +450,14 @@ This section is the single source of truth for every value mapping. Application 
 ### 6.11 Signup request_type (`signups.request_type`)
 
 
-| Int | Label  |
-| --- | ------ |
-| 0   | demo   |
-| 1   | audit  |
-| 2   | signup |
-| 3   | report |
-| 4   | other  |
+| Int | Label     |
+| --- | --------- |
+| 0   | demo      |
+| 1   | audit     |
+| 2   | signup    |
+| 3   | report    |
+| 4   | other     |
+| 5   | hh_signup |
 
 
 ### 6.12 Webhook provider (`webhook_deliveries.provider`)
@@ -467,6 +469,7 @@ This section is the single source of truth for every value mapping. Application 
 | 1   | apollo         |
 | 2   | email_provider |
 | 3   | other          |
+| 4   | thh_signup     |
 
 
 ### 6.13 Webhook status (`webhook_deliveries.status`)

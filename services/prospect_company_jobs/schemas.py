@@ -19,7 +19,7 @@ class JobCreate(BaseModel):
     paid_status: int = Field(default=0, ge=0, le=2)
     confidentiality: int = Field(default=0, ge=0, le=1)
     no_linkedin_post: int = Field(default=0, ge=0, le=1)
-    source: int = Field(default=0, ge=0, le=5)
+    source: int = Field(default=0, ge=0, le=6)
     source_url: Optional[str] = None
     source_external_id: Optional[str] = None
     jd_url: Optional[str] = None
@@ -59,15 +59,56 @@ class JobOut(BaseModel):
     status_label: Optional[str] = None
     candidates_prepared: int
     posted_at: Optional[datetime]
+    opened_at: Optional[datetime] = None
     expectation_target: Optional[int]
     at_risk_at: Optional[datetime]
     target_met_at: Optional[datetime]
     total_applicants: int
     assigned_to_csm_user_id: Optional[int]
     posting_url: Optional[str] = None
+    source_url: Optional[str] = None
+    source: int = 0
+    source_label: Optional[str] = None
+    source_external_id: Optional[str] = None
     jd_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class InboundJobBoardEvent(BaseModel):
+    """Payload from HH-BE when a customer publishes a job on app.thehirehub.ai.
+
+    Idempotent on (source=6 thh_product, source_external_id=str(thh_job_id))
+    via the existing UNIQUE constraint. Re-pushes update mutable fields
+    (paid_status, title, location, posting_url) without overwriting fields
+    the LEADS team may have edited.
+    """
+
+    # Required for identity + idempotency.
+    thh_job_id: int = Field(ge=1)
+    dedup_key: str = Field(min_length=1, max_length=255)
+
+    # Job content (everything optional — HH-BE may have partial data).
+    title: Optional[str] = Field(default=None, max_length=255)
+    job_code: Optional[str] = Field(default=None, max_length=64)
+    location: Optional[str] = Field(default=None, max_length=255)
+    total_positions: Optional[int] = Field(default=None, ge=1)
+    posting_url: Optional[str] = Field(default=None, max_length=500)
+    jd_url: Optional[str] = Field(default=None, max_length=500)
+    published_at: Optional[datetime] = None
+
+    # Company identity — used to find/create the LEADS companies row.
+    thh_company_id: Optional[int] = Field(default=None, ge=1)
+    company_name: Optional[str] = Field(default=None, max_length=255)
+    company_domain: Optional[str] = Field(default=None, max_length=255)
+    company_website: Optional[str] = Field(default=None, max_length=500)
+
+    # Subscription + creator identity — drives paid_status and is_internal flag.
+    subscription_status: Optional[str] = Field(default=None, max_length=32, description="active/trialing/past_due/cancelled/null")
+    plan_code: Optional[str] = Field(default=None, max_length=64)
+    creator_email: Optional[str] = Field(default=None, max_length=255)
+    creator_thh_user_id: Optional[int] = Field(default=None, ge=1)
+    is_internal: bool = Field(default=False, description="true when posted by THH staff for promo")
 
 
 class JobDistributionRequest(BaseModel):

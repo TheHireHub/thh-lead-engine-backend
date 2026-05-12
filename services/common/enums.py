@@ -46,6 +46,7 @@ CHANNELS = {
     10: "warmly",
     11: "direct",
     12: "other",
+    13: "hh_signup",
 }
 
 # §6.4 Company source
@@ -107,10 +108,11 @@ SIGNUP_REQUEST_TYPES = {
     2: "signup",
     3: "report",
     4: "other",
+    5: "hh_signup",
 }
 
 # §6.12 Webhook provider
-WEBHOOK_PROVIDERS = {0: "calendly", 1: "apollo", 2: "email_provider", 3: "other"}
+WEBHOOK_PROVIDERS = {0: "calendly", 1: "apollo", 2: "email_provider", 3: "other", 4: "thh_signup", 5: "thh_job_board"}
 
 # §6.13 Webhook status
 WEBHOOK_STATUSES = {0: "received", 1: "processed", 2: "failed", 3: "duplicate"}
@@ -162,6 +164,7 @@ JOB_SOURCES = {
     3: "linkedin",
     4: "careers_page",
     5: "other",
+    6: "thh_product",  # job published on app.thehirehub.ai, mirrored via /inbound
 }
 
 # §6.21 Job status
@@ -217,7 +220,7 @@ JOB_BOARDS = {
 }
 
 # §6.28 Job board posting status
-JOB_BOARD_POSTING_STATUSES = {0: "pending", 1: "posted", 2: "failed", 3: "removed"}
+JOB_BOARD_POSTING_STATUSES = {0: "pending", 1: "posted", 2: "failed", 3: "removed", 4: "stopped"}
 
 
 def reverse(mapping: dict[int, str]) -> dict[str, int]:

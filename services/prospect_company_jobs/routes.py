@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from sqlalchemy import select
 
 from database_connection.connection import get_db
 from services.admin_users.deps import (
@@ -16,7 +19,10 @@ from services.admin_users.deps import (
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
+from services.candidate_outreach.auth import require_service_token
 from services.common.envelope import ok
+from services.companies.crud import CompanyCRUD
+from services.webhooks.crud import WebhookDeliveryCRUD
 
 from .crud import (
     JobBoardCRUD,
@@ -47,6 +53,7 @@ from .schemas import (
     CandidateNoteUpdate,
     CandidateOut,
     CandidateStatusUpdate,
+    InboundJobBoardEvent,
     JobBoardOut,
     JobCreate,
     JobDistributionRequest,
@@ -54,6 +61,7 @@ from .schemas import (
     JobOut,
     JobUpdate,
 )
+from .models import ProspectCompanyJob
 
 router = APIRouter(prefix="/api/prospect-company-jobs", tags=["prospect_company_jobs"])
 
@@ -66,6 +74,8 @@ def _serialize_job(j) -> dict:
     out["paid_status_label"] = get_label(JOB_PAID_STATUSES, j.paid_status)
     out["confidentiality_label"] = get_label(JOB_CONFIDENTIALITY, j.confidentiality)
     out["status_label"] = get_label(JOB_STATUSES, j.status)
+    from services.common.enums import JOB_SOURCES as _JOB_SOURCES
+    out["source_label"] = get_label(_JOB_SOURCES, j.source)
     return out
 
 
@@ -166,6 +176,83 @@ async def get_job(job_id: int, db: AsyncSession = Depends(get_db),
     return ok(_serialize_job(job))
 
 
+@router.get("/{job_id}/detail")
+async def get_job_detail(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_internal),
+) -> dict:
+    """Rich view used by the CSM Board drawer.
+
+    Joins the job row with its company, all board posting rows, recent history,
+    and resolves admin user IDs (created_by, assigned_csm, board posters,
+    history changers) to display names so the FE renders 'posted by <name>'
+    without a second roundtrip per id.
+    """
+    from services.admin_users.crud import AdminUserCRUD
+    from services.companies.models import Company
+
+    job = await JobCRUD.get_by_id(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    boards = await JobBoardCRUD.list_for_job(db, job_id)
+    history = await JobHistoryCRUD.list_for_job(db, job_id, limit=50)
+
+    company = None
+    if job.company_id:
+        result = await db.execute(select(Company).where(Company.id == job.company_id))
+        company = result.scalar_one_or_none()
+
+    # Resolve admin names in one round-trip.
+    user_ids: set[int] = set()
+    if job.created_by_user_id:
+        user_ids.add(job.created_by_user_id)
+    if job.assigned_to_csm_user_id:
+        user_ids.add(job.assigned_to_csm_user_id)
+    for b in boards:
+        if b.posted_by_user_id:
+            user_ids.add(b.posted_by_user_id)
+    for h in history:
+        if h.changed_by_user_id:
+            user_ids.add(h.changed_by_user_id)
+    names_map = await AdminUserCRUD.names_by_ids(db, list(user_ids)) if user_ids else {}
+
+    def _board_dict(b) -> dict:
+        d = _serialize_board(b)
+        d["posted_by_name"] = names_map.get(b.posted_by_user_id) if b.posted_by_user_id else None
+        return d
+
+    def _history_dict(h) -> dict:
+        d = JobHistoryOut.model_validate(h).model_dump()
+        d["changed_by_name"] = names_map.get(h.changed_by_user_id) if h.changed_by_user_id else None
+        return d
+
+    return ok(
+        {
+            "job": _serialize_job(job),
+            "company": (
+                {
+                    "id": company.id,
+                    "name": company.name,
+                    "domain": company.domain,
+                    "linkedin_url": company.linkedin_url,
+                    "industry": company.industry,
+                    "size": company.size,
+                }
+                if company
+                else None
+            ),
+            "boards": [_board_dict(b) for b in boards],
+            "history": [_history_dict(h) for h in history],
+            "created_by_name": names_map.get(job.created_by_user_id) if job.created_by_user_id else None,
+            "assigned_to_csm_name": (
+                names_map.get(job.assigned_to_csm_user_id) if job.assigned_to_csm_user_id else None
+            ),
+        }
+    )
+
+
 @router.get("/{job_id}/history")
 async def job_history(
     job_id: int,
@@ -245,6 +332,220 @@ async def create_job(payload: JobCreate, db: AsyncSession = Depends(get_db),
     return ok(_serialize_job(job), message="job created")
 
 
+# ----------------------------------------------------- inbound (HH product)
+
+_JOB_SOURCE_THH_PRODUCT = 6           # JOB_SOURCES §6.20
+_WEBHOOK_PROVIDER_THH_JOB_BOARD = 5   # WEBHOOK_PROVIDERS §6.12 (distinct from 4=thh_signup)
+_PAID_STATUS_PAID = 1                 # JOB_PAID_STATUSES §6.18
+_PAID_STATUS_NON_PAID = 2
+
+_PAID_SUB_STATUSES = {"active", "past_due"}
+_TRIAL_SUB_STATUSES = {"trialing", "trial"}
+
+
+def _resolve_paid_status(subscription_status: Optional[str]) -> int:
+    """Map a HH-BE subscription status string into the LEADS paid_status enum.
+
+    Defines what "paid customer" means for CSM prioritisation on the board:
+      active / past_due  -> paid (1)
+      everything else    -> non_paid (2)
+        - trialing / trial: free trial period, not yet revenue
+        - cancelled: revenue stopped
+        - null / unknown / anything weird: assume free until proven otherwise
+
+    past_due IS counted as paid because the invoice is overdue (not cancelled);
+    they're still a paying customer with a billing issue, sales should keep
+    them in the paid bucket so CSM follows up. If product wants past_due to
+    appear as "at risk" elsewhere we surface that via a separate signal, not
+    by demoting paid_status here.
+    """
+    if not subscription_status:
+        return _PAID_STATUS_NON_PAID
+    return _PAID_STATUS_PAID if subscription_status.strip().lower() in _PAID_SUB_STATUSES else _PAID_STATUS_NON_PAID
+
+
+def _extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
+    if not url_or_domain:
+        return None
+    raw = url_or_domain.strip().lower()
+    if not raw:
+        return None
+    if "@" in raw and "://" not in raw:
+        raw = raw.split("@", 1)[1]
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if raw.startswith("www."):
+        raw = raw[4:]
+    return raw or None
+
+
+@router.post("/inbound")
+async def inbound_job_board_event(
+    payload: InboundJobBoardEvent,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+) -> dict:
+    """HH-BE posts here when a customer publishes a job on app.thehirehub.ai.
+
+    Idempotent on (source=6 thh_product, source_external_id=str(thh_job_id))
+    AND on (provider=4 thh_signup, external_event_id=dedup_key). The first
+    push creates the row; later pushes patch mutable fields (paid_status,
+    posting_url, location, title) without touching CSM-curated fields
+    (assigned_to_csm_user_id, expectation_target, notes, status).
+    """
+    # 1) Idempotency check via webhook_deliveries.
+    wd_row, was_duplicate = await WebhookDeliveryCRUD.record(
+        db,
+        provider=_WEBHOOK_PROVIDER_THH_JOB_BOARD,
+        external_event_id=payload.dedup_key,
+        payload_json=payload.model_dump(mode="json"),
+    )
+    if was_duplicate:
+        return ok(
+            {"created": False, "job_id": None, "dedup_key": payload.dedup_key},
+            message="already_received",
+        )
+
+    try:
+        # 2) Resolve the LEADS company. HH posts always carry SOME identity
+        # (company_name + domain or website). If neither resolves, fall back
+        # to the creator's email domain (avoids creating a synthetic
+        # 'thh-internal+ID.local' shell when the customer signed up with a
+        # work email but never filled the company website). ProspectCompanyJob
+        # .company_id is NOT NULL.
+        domain = (
+            _extract_domain(payload.company_domain)
+            or _extract_domain(payload.company_website)
+            or _extract_domain(payload.creator_email)
+        )
+        if not domain and not payload.company_name:
+            await WebhookDeliveryCRUD.mark_failed(db, wd_row, "no company identity in payload")
+            raise HTTPException(status_code=400, detail="company identity required")
+
+        company = None
+        if domain:
+            company, _created = await CompanyCRUD.get_or_create_by_domain(
+                db,
+                domain=domain,
+                name=payload.company_name or domain,
+                source=2,  # COMPANY_SOURCES §6.4 = signup
+            )
+
+        if company is None:
+            # No domain — anonymous internal promo? Use company_name as the
+            # display name with a synthetic domain so the FK resolves. Anchor
+            # on thh_company_id when available so all jobs from the same
+            # company collapse into one LEADS company row; fall back to
+            # job_id for unattributed posts. dedup_key is the ultimate
+            # tiebreaker — used here only to avoid `None` ever appearing in
+            # the synthetic-domain string.
+            anchor = (
+                payload.thh_company_id
+                or payload.thh_job_id
+                or f"k{abs(hash(payload.dedup_key)) % 10**9}"
+            )
+            synthetic_domain = f"thh-internal+{anchor}.local"
+            company, _ = await CompanyCRUD.get_or_create_by_domain(
+                db,
+                domain=synthetic_domain,
+                name=payload.company_name or "Internal promo",
+                source=2,
+            )
+
+        # 3) Upsert on (source, source_external_id) UNIQUE.
+        existing_result = await db.execute(
+            select(ProspectCompanyJob).where(
+                ProspectCompanyJob.source == _JOB_SOURCE_THH_PRODUCT,
+                ProspectCompanyJob.source_external_id == str(payload.thh_job_id),
+                ProspectCompanyJob.deleted_at.is_(None),
+            )
+        )
+        job = existing_result.scalar_one_or_none()
+
+        paid_status = _resolve_paid_status(payload.subscription_status)
+
+        if job is None:
+            job_fields = {
+                "company_id": company.id,
+                "title": (payload.title or payload.job_code or "Untitled job")[:255],
+                "location": payload.location,
+                "open_count": payload.total_positions or 1,
+                "paid_status": paid_status,
+                "source": _JOB_SOURCE_THH_PRODUCT,
+                "source_url": payload.posting_url,
+                "source_external_id": str(payload.thh_job_id),
+                "posting_url": payload.posting_url,
+                "jd_url": payload.jd_url,
+                # NOTE: `posted_at` on prospect_company_jobs is "CSM clicked
+                # Post a Job to distribute" — not "customer published on HH".
+                # Leaving it NULL puts the job correctly in the To Post
+                # column. The HH publish timestamp lives on `opened_at`.
+                "opened_at": payload.published_at,
+                "status": 0,  # open
+            }
+            job = await JobCRUD.create(db, **job_fields)
+            await AuditLogCRUD.record(
+                db,
+                entity_type="prospect_company_job",
+                entity_id=job.id,
+                action="inbound_create",
+                after_json={
+                    "source": _JOB_SOURCE_THH_PRODUCT,
+                    "source_external_id": str(payload.thh_job_id),
+                    "is_internal": payload.is_internal,
+                    "plan_code": payload.plan_code,
+                    "subscription_status": payload.subscription_status,
+                },
+            )
+            created = True
+        else:
+            # Patch mutable fields. Never overwrite CSM-curated columns.
+            patch: dict = {}
+            if payload.title and not job.title.startswith("Untitled"):
+                # Keep CSM-edited title; only fill if it's still our default.
+                pass
+            elif payload.title:
+                patch["title"] = payload.title[:255]
+            if payload.location and not job.location:
+                patch["location"] = payload.location
+            if payload.posting_url and not job.posting_url:
+                patch["posting_url"] = payload.posting_url
+            if payload.jd_url and not job.jd_url:
+                patch["jd_url"] = payload.jd_url
+            if paid_status != job.paid_status:
+                patch["paid_status"] = paid_status
+            if payload.published_at and not job.opened_at:
+                patch["opened_at"] = payload.published_at
+            if patch:
+                job = await JobCRUD.update(db, job, **patch)
+                await AuditLogCRUD.record(
+                    db,
+                    entity_type="prospect_company_job",
+                    entity_id=job.id,
+                    action="inbound_update",
+                    after_json=patch,
+                )
+            created = False
+
+        await WebhookDeliveryCRUD.mark_processed(db, wd_row)
+        return ok(
+            {
+                "created": created,
+                "job_id": job.id,
+                "company_id": company.id,
+                "paid_status": paid_status,
+                "dedup_key": payload.dedup_key,
+            },
+            message="ingested",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await WebhookDeliveryCRUD.mark_failed(db, wd_row, str(exc)[:1000])
+        raise HTTPException(status_code=500, detail=f"ingest failed: {exc}")
+
+
 @router.patch("/{job_id}")
 async def update_job(
     job_id: int,
@@ -298,6 +599,7 @@ async def distribute_job(
         boards=payload.boards,
         expectation_target=payload.expectation_target,
         days_threshold=payload.days_threshold,
+        posted_by_user_id=_user.id,
     )
     await AuditLogCRUD.record(
         db,
@@ -386,6 +688,70 @@ async def mark_board_removed(
         to_value="removed",
     )
     return ok(_serialize_board(row), message="board marked removed")
+
+
+@router.post("/boards/{board_row_id}/mark-stopped")
+async def mark_board_stopped(
+    board_row_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_csm),
+) -> dict:
+    """Halt an active board posting. Status flips to 4 ('stopped'),
+    removed_at gets set. Difference vs mark-removed: 'stopped' is
+    explicitly CSM-initiated; 'removed' is for board-side pulls / failures.
+    """
+    row = await JobBoardCRUD.get_by_id(db, board_row_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="board row not found")
+    prev = get_label(JOB_BOARD_POSTING_STATUSES, row.status)
+    row = await JobBoardCRUD.mark_stopped(db, row)
+    await JobHistoryCRUD.record(
+        db,
+        prospect_company_job_id=row.prospect_company_job_id,
+        field_name=f"board[{get_label(JOB_BOARDS, row.board)}].status",
+        from_value=prev,
+        to_value="stopped",
+    )
+    return ok(_serialize_board(row), message="board marked stopped")
+
+
+class _BoardApplicantPatch(BaseModel):
+    applicant_count: int = Field(ge=0, le=999999)
+
+
+@router.post("/boards/{board_row_id}/applicants")
+async def update_board_applicants(
+    board_row_id: int,
+    payload: _BoardApplicantPatch,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_csm),
+) -> dict:
+    """Manual applicant count edit for a single board posting. Drives the
+    drawer's inline-edit affordance — LinkedIn (and every other board) is
+    manual-entry today; no auto-scrape exists. The job-level
+    total_applicants gets recomputed via JobCRUD.record_applicants so the
+    Performance board metrics stay consistent."""
+    row = await JobBoardCRUD.get_by_id(db, board_row_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="board row not found")
+    prev = row.applicant_count
+    row = await JobBoardCRUD.update_applicant_count(
+        db, row, applicant_count=payload.applicant_count
+    )
+    # Recompute the job-level total + at_risk_at / target_met_at ratchet.
+    job = await JobCRUD.get_by_id(db, row.prospect_company_job_id)
+    if job is not None:
+        await JobCRUD.record_applicants(
+            db, job, board=row.board, applicant_count=row.applicant_count
+        )
+    await JobHistoryCRUD.record(
+        db,
+        prospect_company_job_id=row.prospect_company_job_id,
+        field_name=f"board[{get_label(JOB_BOARDS, row.board)}].applicant_count",
+        from_value=str(prev),
+        to_value=str(row.applicant_count),
+    )
+    return ok(_serialize_board(row), message="applicants updated")
 
 
 @router.post("/{job_id}/applicants")
