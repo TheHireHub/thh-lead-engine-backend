@@ -46,6 +46,7 @@ CHANNELS = {
     10: "warmly",
     11: "direct",
     12: "other",
+    13: "hh_signup",
 }
 
 # §6.4 Company source
@@ -107,10 +108,11 @@ SIGNUP_REQUEST_TYPES = {
     2: "signup",
     3: "report",
     4: "other",
+    5: "hh_signup",
 }
 
 # §6.12 Webhook provider
-WEBHOOK_PROVIDERS = {0: "calendly", 1: "apollo", 2: "email_provider", 3: "other"}
+WEBHOOK_PROVIDERS = {0: "calendly", 1: "apollo", 2: "email_provider", 3: "other", 4: "thh_signup"}
 
 # §6.13 Webhook status
 WEBHOOK_STATUSES = {0: "received", 1: "processed", 2: "failed", 3: "duplicate"}

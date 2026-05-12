@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
@@ -13,6 +15,7 @@ from services.admin_users.deps import require_internal
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
+from services.candidate_outreach.auth import require_service_token
 from services.common.envelope import ok
 from services.integrations import telegram, thh_backend
 from services.landing_pages.crud import (
@@ -21,12 +24,22 @@ from services.landing_pages.crud import (
 )
 from services.prospects.crud import ProspectCRUD
 from services.prospects.dedupe import find_existing
+from services.prospects.models import Prospect
+from services.webhooks.crud import WebhookDeliveryCRUD
 
 from .crud import SignupCRUD
 from .enums import SIGNUP_REQUEST_TYPES, get_label
-from .schemas import OtpVerifyPayload, SignupCreate, SignupOut
+from .schemas import InboundLeadEvent, OtpVerifyPayload, SignupCreate, SignupOut
 
 router = APIRouter(prefix="/api/signups", tags=["signups"])
+
+# Constants for inbound-leads ingest (docs/INBOUND_LEADS.md §3).
+_CHANNEL_HH_SIGNUP = 13           # §6.3 CHANNELS
+_REQTYPE_HH_SIGNUP = 5            # §6.11 SIGNUP_REQUEST_TYPES
+_WEBHOOK_PROVIDER_THH = 4         # §6.12 WEBHOOK_PROVIDERS
+_STAGE_CURIOUS = 1                # §6.2 FUNNEL_STAGES
+# Event types that signal L3 (OTP verified / company onboarded).
+_L3_EVENTS = {"otp_verified", "company_onboarded"}
 
 # In-memory rate limiter for resend-otp.
 # TODO: swap for redis-backed limiter in prod (gunicorn workers don't share dicts).
@@ -242,3 +255,144 @@ async def verify_otp(
         after_json={"email": signup.email},
     )
     return ok(_serialize(signup), message="otp verified")
+
+
+# ─── Inbound webhook (HH-BE → LEADS, X-Service-Token) ───────────────────
+# docs/INBOUND_LEADS.md §5.1. One push per fire-point in HH-BE signup flow.
+# Mirrors candidate_outreach.routes:ingest_outreach idempotency pattern.
+
+
+@router.post("/inbound", status_code=status.HTTP_200_OK)
+async def inbound_lead_event(
+    payload: InboundLeadEvent,
+    db: AsyncSession = Depends(get_db),
+    _auth: None = Depends(require_service_token),
+) -> dict:
+    """
+    HH-BE pushes one lead event here. Idempotent on `dedup_key` via
+    webhook_deliveries(provider=4, external_event_id=dedup_key).
+
+    Behaviour by event_type:
+      - partial_signup / enquiry_form / calendly_booked / otp_requested
+        → upsert prospect (by email), record_touch on channel=13, insert
+          signups row (otp_verified_at=NULL).
+      - otp_verified / company_onboarded
+        → same as above PLUS set_registered + set_thh_user_id, signups
+          row gets otp_verified_at=NOW.
+    """
+    if not payload.email and not payload.thh_user_id:
+        raise HTTPException(status_code=400, detail="email or thh_user_id required")
+
+    # 1) Idempotency check via webhook_deliveries.
+    wd_row, was_duplicate = await WebhookDeliveryCRUD.record(
+        db,
+        provider=_WEBHOOK_PROVIDER_THH,
+        external_event_id=payload.dedup_key,
+        payload_json=payload.model_dump(mode="json"),
+    )
+    if was_duplicate:
+        return ok(
+            {"created": False, "prospect_id": None, "signup_id": None, "dedup_key": payload.dedup_key},
+            message="already_received",
+        )
+
+    try:
+        # 2) Find or create prospect.
+        # Priority: thh_user_id (verified-user truth) → email → phone (via find_existing).
+        email = (payload.email or "").strip().lower() or None
+        prospect: Prospect | None = None
+
+        if payload.thh_user_id:
+            result = await db.execute(
+                select(Prospect).where(Prospect.thh_user_id == payload.thh_user_id)
+            )
+            prospect = result.scalar_one_or_none()
+
+        if prospect is None and email:
+            prospect = await find_existing(db, email=email, phone=payload.phone)
+
+        if prospect is None and email:
+            prospect = await ProspectCRUD.create(
+                db,
+                email=email,
+                phone=payload.phone,
+                first_name=payload.first_name,
+                last_name=payload.last_name,
+                source_channel=_CHANNEL_HH_SIGNUP,
+                stage=_STAGE_CURIOUS,
+            )
+        elif prospect is not None:
+            # Enrich blanks; never overwrite non-null fields.
+            updates = {}
+            if payload.first_name and not prospect.first_name:
+                updates["first_name"] = payload.first_name
+            if payload.last_name and not prospect.last_name:
+                updates["last_name"] = payload.last_name
+            if payload.phone and not prospect.phone:
+                updates["phone"] = payload.phone
+            if updates:
+                prospect = await ProspectCRUD.update(db, prospect, **updates)
+
+        if prospect is None:
+            # Should not happen given the validation above, but guard.
+            raise HTTPException(status_code=400, detail="cannot resolve prospect")
+
+        # 3) Bump touch counters + prospect_channels junction.
+        await ProspectCRUD.record_touch(db, prospect, channel=_CHANNEL_HH_SIGNUP)
+
+        # 4) L3-specific milestones.
+        is_l3 = payload.event_type in _L3_EVENTS
+        if is_l3:
+            await ProspectCRUD.set_registered(db, prospect)
+            if payload.thh_user_id and not prospect.thh_user_id:
+                await ProspectCRUD.set_thh_user_id(db, prospect, payload.thh_user_id)
+
+        # 5) Append signups row (one per touch — full event fidelity).
+        signup_fields = dict(
+            prospect_id=prospect.id,
+            email=email or f"unknown+{payload.dedup_key}@thh.internal",
+            name=" ".join(p for p in (payload.first_name, payload.last_name) if p) or None,
+            company_name=payload.company_name,
+            phone=payload.phone,
+            request_type=_REQTYPE_HH_SIGNUP,
+            payload_json={
+                "event_type": payload.event_type,
+                "slug": payload.slug,
+                "thh_user_id": payload.thh_user_id,
+                "thh_company_id": payload.thh_company_id,
+                "signup_source": payload.signup_source,
+                "source_meta": payload.source_meta,
+                "touch": payload.touch,
+                "anonymous": payload.anonymous,
+                "event_occurred_at": payload.event_occurred_at.isoformat(),
+            },
+        )
+        if is_l3:
+            signup_fields["otp_verified_at"] = datetime.now(timezone.utc)
+        signup = await SignupCRUD.create(db, **signup_fields)
+
+        # 6) Audit + mark webhook processed.
+        await AuditLogCRUD.record(
+            db,
+            entity_type="signup",
+            entity_id=signup.id,
+            action=f"inbound_{payload.event_type}",
+            after_json={"email": email, "prospect_id": prospect.id, "dedup_key": payload.dedup_key},
+        )
+        await WebhookDeliveryCRUD.mark_processed(db, wd_row)
+
+        return ok(
+            {
+                "created": True,
+                "prospect_id": prospect.id,
+                "signup_id": signup.id,
+                "is_l3": is_l3,
+                "dedup_key": payload.dedup_key,
+            },
+            message="ingested",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await WebhookDeliveryCRUD.mark_failed(db, wd_row, str(exc)[:1000])
+        raise HTTPException(status_code=500, detail=f"ingest failed: {exc}")
