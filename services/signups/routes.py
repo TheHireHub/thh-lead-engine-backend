@@ -46,7 +46,10 @@ _L3_EVENTS = {"otp_verified", "company_onboarded"}
 # L4 events — user moved past signup and is creating/publishing jobs.
 # We do not set otp_verified_at here (it's a separate milestone) but DO bump
 # prospects.first_job_created_at + jobs_created_count via set_first_job_created.
-_L4_EVENTS = {"job_draft_created", "job_published"}
+# `job_step_advanced` fires at each current_step transition inside the wizard
+# (step 2 jd_fields_extracted, step 4 interview_config_saved, step 5
+# outreach_config_saved). The exact step + label lives in source_meta.
+_L4_EVENTS = {"job_draft_created", "job_step_advanced", "job_published"}
 
 
 def _extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
