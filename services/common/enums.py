@@ -112,7 +112,7 @@ SIGNUP_REQUEST_TYPES = {
 }
 
 # §6.12 Webhook provider
-WEBHOOK_PROVIDERS = {0: "calendly", 1: "apollo", 2: "email_provider", 3: "other", 4: "thh_signup"}
+WEBHOOK_PROVIDERS = {0: "calendly", 1: "apollo", 2: "email_provider", 3: "other", 4: "thh_signup", 5: "thh_job_board"}
 
 # §6.13 Webhook status
 WEBHOOK_STATUSES = {0: "received", 1: "processed", 2: "failed", 3: "duplicate"}

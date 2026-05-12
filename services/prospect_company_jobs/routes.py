@@ -173,6 +173,83 @@ async def get_job(job_id: int, db: AsyncSession = Depends(get_db),
     return ok(_serialize_job(job))
 
 
+@router.get("/{job_id}/detail")
+async def get_job_detail(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_internal),
+) -> dict:
+    """Rich view used by the CSM Board drawer.
+
+    Joins the job row with its company, all board posting rows, recent history,
+    and resolves admin user IDs (created_by, assigned_csm, board posters,
+    history changers) to display names so the FE renders 'posted by <name>'
+    without a second roundtrip per id.
+    """
+    from services.admin_users.crud import AdminUserCRUD
+    from services.companies.models import Company
+
+    job = await JobCRUD.get_by_id(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    boards = await JobBoardCRUD.list_for_job(db, job_id)
+    history = await JobHistoryCRUD.list_for_job(db, job_id, limit=50)
+
+    company = None
+    if job.company_id:
+        result = await db.execute(select(Company).where(Company.id == job.company_id))
+        company = result.scalar_one_or_none()
+
+    # Resolve admin names in one round-trip.
+    user_ids: set[int] = set()
+    if job.created_by_user_id:
+        user_ids.add(job.created_by_user_id)
+    if job.assigned_to_csm_user_id:
+        user_ids.add(job.assigned_to_csm_user_id)
+    for b in boards:
+        if b.posted_by_user_id:
+            user_ids.add(b.posted_by_user_id)
+    for h in history:
+        if h.changed_by_user_id:
+            user_ids.add(h.changed_by_user_id)
+    names_map = await AdminUserCRUD.names_by_ids(db, list(user_ids)) if user_ids else {}
+
+    def _board_dict(b) -> dict:
+        d = _serialize_board(b)
+        d["posted_by_name"] = names_map.get(b.posted_by_user_id) if b.posted_by_user_id else None
+        return d
+
+    def _history_dict(h) -> dict:
+        d = JobHistoryOut.model_validate(h).model_dump()
+        d["changed_by_name"] = names_map.get(h.changed_by_user_id) if h.changed_by_user_id else None
+        return d
+
+    return ok(
+        {
+            "job": _serialize_job(job),
+            "company": (
+                {
+                    "id": company.id,
+                    "name": company.name,
+                    "domain": company.domain,
+                    "linkedin_url": company.linkedin_url,
+                    "industry": company.industry,
+                    "size": company.size,
+                }
+                if company
+                else None
+            ),
+            "boards": [_board_dict(b) for b in boards],
+            "history": [_history_dict(h) for h in history],
+            "created_by_name": names_map.get(job.created_by_user_id) if job.created_by_user_id else None,
+            "assigned_to_csm_name": (
+                names_map.get(job.assigned_to_csm_user_id) if job.assigned_to_csm_user_id else None
+            ),
+        }
+    )
+
+
 @router.get("/{job_id}/history")
 async def job_history(
     job_id: int,
@@ -255,7 +332,7 @@ async def create_job(payload: JobCreate, db: AsyncSession = Depends(get_db),
 # ----------------------------------------------------- inbound (HH product)
 
 _JOB_SOURCE_THH_PRODUCT = 6           # JOB_SOURCES §6.20
-_WEBHOOK_PROVIDER_THH = 4             # WEBHOOK_PROVIDERS §6.12 (shared with signups inbound)
+_WEBHOOK_PROVIDER_THH_JOB_BOARD = 5   # WEBHOOK_PROVIDERS §6.12 (distinct from 4=thh_signup)
 _PAID_STATUS_PAID = 1                 # JOB_PAID_STATUSES §6.18
 _PAID_STATUS_NON_PAID = 2
 
@@ -266,8 +343,18 @@ _TRIAL_SUB_STATUSES = {"trialing", "trial"}
 def _resolve_paid_status(subscription_status: Optional[str]) -> int:
     """Map a HH-BE subscription status string into the LEADS paid_status enum.
 
-    active / past_due → paid (1)
-    trialing / trial / null / cancelled / unknown → non_paid (2)
+    Defines what "paid customer" means for CSM prioritisation on the board:
+      active / past_due  -> paid (1)
+      everything else    -> non_paid (2)
+        - trialing / trial: free trial period, not yet revenue
+        - cancelled: revenue stopped
+        - null / unknown / anything weird: assume free until proven otherwise
+
+    past_due IS counted as paid because the invoice is overdue (not cancelled);
+    they're still a paying customer with a billing issue, sales should keep
+    them in the paid bucket so CSM follows up. If product wants past_due to
+    appear as "at risk" elsewhere we surface that via a separate signal, not
+    by demoting paid_status here.
     """
     if not subscription_status:
         return _PAID_STATUS_NON_PAID
@@ -307,7 +394,7 @@ async def inbound_job_board_event(
     # 1) Idempotency check via webhook_deliveries.
     wd_row, was_duplicate = await WebhookDeliveryCRUD.record(
         db,
-        provider=_WEBHOOK_PROVIDER_THH,
+        provider=_WEBHOOK_PROVIDER_THH_JOB_BOARD,
         external_event_id=payload.dedup_key,
         payload_json=payload.model_dump(mode="json"),
     )
@@ -337,8 +424,18 @@ async def inbound_job_board_event(
 
         if company is None:
             # No domain — anonymous internal promo? Use company_name as the
-            # display name with a synthetic domain so the FK resolves.
-            synthetic_domain = f"thh-internal+{payload.thh_company_id or payload.thh_job_id}.local"
+            # display name with a synthetic domain so the FK resolves. Anchor
+            # on thh_company_id when available so all jobs from the same
+            # company collapse into one LEADS company row; fall back to
+            # job_id for unattributed posts. dedup_key is the ultimate
+            # tiebreaker — used here only to avoid `None` ever appearing in
+            # the synthetic-domain string.
+            anchor = (
+                payload.thh_company_id
+                or payload.thh_job_id
+                or f"k{abs(hash(payload.dedup_key)) % 10**9}"
+            )
+            synthetic_domain = f"thh-internal+{anchor}.local"
             company, _ = await CompanyCRUD.get_or_create_by_domain(
                 db,
                 domain=synthetic_domain,
