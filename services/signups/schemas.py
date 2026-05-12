@@ -71,3 +71,11 @@ class InboundLeadEvent(BaseModel):
     source_meta: Optional[dict] = None
     touch: Optional[dict] = None
     anonymous: bool = False  # set by HH-BE for calendly-anon path (synthetic email)
+
+    # Company-profile enrichment (L3 onboarding pushes these; L1/L2 leave blank).
+    # Used to upsert the LEADS `companies` row keyed by domain.
+    company_website: Optional[str] = Field(default=None, max_length=500)
+    company_linkedin_url: Optional[str] = Field(default=None, max_length=500)
+    company_industry: Optional[str] = Field(default=None, max_length=100)
+    company_size: Optional[str] = Field(default=None, max_length=50)
+    company_founded_year: Optional[int] = Field(default=None, ge=1800, le=2100)

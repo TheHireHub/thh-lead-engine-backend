@@ -17,6 +17,7 @@ from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
 from services.candidate_outreach.auth import require_service_token
 from services.common.envelope import ok
+from services.companies.crud import CompanyCRUD
 from services.integrations import telegram, thh_backend
 from services.landing_pages.crud import (
     LandingPageVariantCRUD,
@@ -38,8 +39,30 @@ _CHANNEL_HH_SIGNUP = 13           # §6.3 CHANNELS
 _REQTYPE_HH_SIGNUP = 5            # §6.11 SIGNUP_REQUEST_TYPES
 _WEBHOOK_PROVIDER_THH = 4         # §6.12 WEBHOOK_PROVIDERS
 _STAGE_CURIOUS = 1                # §6.2 FUNNEL_STAGES
+_COMPANY_SOURCE_SIGNUP = 2        # §6.4 COMPANY_SOURCES (2=signup)
 # Event types that signal L3 (OTP verified / company onboarded).
 _L3_EVENTS = {"otp_verified", "company_onboarded"}
+
+
+def _extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
+    """Best-effort domain extraction.
+
+    Accepts 'https://acme.com/about', 'acme.com', 'www.acme.com', 'user@acme.com'.
+    Returns lowercased bare domain or None.
+    """
+    if not url_or_domain:
+        return None
+    raw = url_or_domain.strip().lower()
+    if not raw:
+        return None
+    if "@" in raw and "://" not in raw:
+        raw = raw.split("@", 1)[1]
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if raw.startswith("www."):
+        raw = raw[4:]
+    return raw or None
 
 # In-memory rate limiter for resend-otp.
 # TODO: swap for redis-backed limiter in prod (gunicorn workers don't share dicts).
@@ -337,17 +360,51 @@ async def inbound_lead_event(
             # Should not happen given the validation above, but guard.
             raise HTTPException(status_code=400, detail="cannot resolve prospect")
 
-        # 3) Bump touch counters + prospect_channels junction.
+        # 3) Upsert + enrich the company row when L3 supplies enough to identify it.
+        # Keyed by domain (extracted from company_website or signup email). The
+        # `companies` table has a UNIQUE(domain) so re-pushes are idempotent. We
+        # enrich blanks only — never overwrite the rightful owner's fields. The
+        # prospect's company_id pointer is set if currently null.
+        company_domain = _extract_domain(payload.company_website) or _extract_domain(email)
+        if company_domain and (payload.company_name or payload.company_website):
+            company, _ = await CompanyCRUD.get_or_create_by_domain(
+                db,
+                domain=company_domain,
+                name=payload.company_name or company_domain,
+                source=_COMPANY_SOURCE_SIGNUP,
+                linkedin_url=payload.company_linkedin_url,
+                industry=payload.company_industry,
+                size=payload.company_size,
+            )
+            # Enrich blanks on subsequent pushes (e.g. L1 dropped a domain, L3
+            # later supplies linkedin + industry).
+            company_updates = {}
+            if payload.company_name and not company.name:
+                company_updates["name"] = payload.company_name
+            if payload.company_linkedin_url and not company.linkedin_url:
+                company_updates["linkedin_url"] = payload.company_linkedin_url
+            if payload.company_industry and not company.industry:
+                company_updates["industry"] = payload.company_industry
+            if payload.company_size and not company.size:
+                company_updates["size"] = payload.company_size
+            if company_updates:
+                company = await CompanyCRUD.update(db, company, **company_updates)
+            if not prospect.company_id:
+                prospect.company_id = company.id
+                await db.commit()
+                await db.refresh(prospect)
+
+        # 4) Bump touch counters + prospect_channels junction.
         await ProspectCRUD.record_touch(db, prospect, channel=_CHANNEL_HH_SIGNUP)
 
-        # 4) L3-specific milestones.
+        # 5) L3-specific milestones.
         is_l3 = payload.event_type in _L3_EVENTS
         if is_l3:
             await ProspectCRUD.set_registered(db, prospect)
             if payload.thh_user_id and not prospect.thh_user_id:
                 await ProspectCRUD.set_thh_user_id(db, prospect, payload.thh_user_id)
 
-        # 5) Append signups row (one per touch — full event fidelity).
+        # 6) Append signups row (one per touch — full event fidelity).
         signup_fields = dict(
             prospect_id=prospect.id,
             email=email or f"unknown+{payload.dedup_key}@thh.internal",
@@ -365,13 +422,18 @@ async def inbound_lead_event(
                 "touch": payload.touch,
                 "anonymous": payload.anonymous,
                 "event_occurred_at": payload.event_occurred_at.isoformat(),
+                "company_website": payload.company_website,
+                "company_linkedin_url": payload.company_linkedin_url,
+                "company_industry": payload.company_industry,
+                "company_size": payload.company_size,
+                "company_founded_year": payload.company_founded_year,
             },
         )
         if is_l3:
             signup_fields["otp_verified_at"] = datetime.now(timezone.utc)
         signup = await SignupCRUD.create(db, **signup_fields)
 
-        # 6) Audit + mark webhook processed.
+        # 7) Audit + mark webhook processed.
         await AuditLogCRUD.record(
             db,
             entity_type="signup",
