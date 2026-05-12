@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
@@ -73,6 +74,8 @@ def _serialize_job(j) -> dict:
     out["paid_status_label"] = get_label(JOB_PAID_STATUSES, j.paid_status)
     out["confidentiality_label"] = get_label(JOB_CONFIDENTIALITY, j.confidentiality)
     out["status_label"] = get_label(JOB_STATUSES, j.status)
+    from services.common.enums import JOB_SOURCES as _JOB_SOURCES
+    out["source_label"] = get_label(_JOB_SOURCES, j.source)
     return out
 
 
@@ -406,9 +409,16 @@ async def inbound_job_board_event(
 
     try:
         # 2) Resolve the LEADS company. HH posts always carry SOME identity
-        # (company_name + domain or website). If neither resolves, bail —
-        # ProspectCompanyJob.company_id is NOT NULL.
-        domain = _extract_domain(payload.company_domain) or _extract_domain(payload.company_website)
+        # (company_name + domain or website). If neither resolves, fall back
+        # to the creator's email domain (avoids creating a synthetic
+        # 'thh-internal+ID.local' shell when the customer signed up with a
+        # work email but never filled the company website). ProspectCompanyJob
+        # .company_id is NOT NULL.
+        domain = (
+            _extract_domain(payload.company_domain)
+            or _extract_domain(payload.company_website)
+            or _extract_domain(payload.creator_email)
+        )
         if not domain and not payload.company_name:
             await WebhookDeliveryCRUD.mark_failed(db, wd_row, "no company identity in payload")
             raise HTTPException(status_code=400, detail="company identity required")
@@ -467,7 +477,11 @@ async def inbound_job_board_event(
                 "source_external_id": str(payload.thh_job_id),
                 "posting_url": payload.posting_url,
                 "jd_url": payload.jd_url,
-                "posted_at": payload.published_at,
+                # NOTE: `posted_at` on prospect_company_jobs is "CSM clicked
+                # Post a Job to distribute" — not "customer published on HH".
+                # Leaving it NULL puts the job correctly in the To Post
+                # column. The HH publish timestamp lives on `opened_at`.
+                "opened_at": payload.published_at,
                 "status": 0,  # open
             }
             job = await JobCRUD.create(db, **job_fields)
@@ -501,8 +515,8 @@ async def inbound_job_board_event(
                 patch["jd_url"] = payload.jd_url
             if paid_status != job.paid_status:
                 patch["paid_status"] = paid_status
-            if payload.published_at and not job.posted_at:
-                patch["posted_at"] = payload.published_at
+            if payload.published_at and not job.opened_at:
+                patch["opened_at"] = payload.published_at
             if patch:
                 job = await JobCRUD.update(db, job, **patch)
                 await AuditLogCRUD.record(
@@ -585,6 +599,7 @@ async def distribute_job(
         boards=payload.boards,
         expectation_target=payload.expectation_target,
         days_threshold=payload.days_threshold,
+        posted_by_user_id=_user.id,
     )
     await AuditLogCRUD.record(
         db,
@@ -673,6 +688,70 @@ async def mark_board_removed(
         to_value="removed",
     )
     return ok(_serialize_board(row), message="board marked removed")
+
+
+@router.post("/boards/{board_row_id}/mark-stopped")
+async def mark_board_stopped(
+    board_row_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_csm),
+) -> dict:
+    """Halt an active board posting. Status flips to 4 ('stopped'),
+    removed_at gets set. Difference vs mark-removed: 'stopped' is
+    explicitly CSM-initiated; 'removed' is for board-side pulls / failures.
+    """
+    row = await JobBoardCRUD.get_by_id(db, board_row_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="board row not found")
+    prev = get_label(JOB_BOARD_POSTING_STATUSES, row.status)
+    row = await JobBoardCRUD.mark_stopped(db, row)
+    await JobHistoryCRUD.record(
+        db,
+        prospect_company_job_id=row.prospect_company_job_id,
+        field_name=f"board[{get_label(JOB_BOARDS, row.board)}].status",
+        from_value=prev,
+        to_value="stopped",
+    )
+    return ok(_serialize_board(row), message="board marked stopped")
+
+
+class _BoardApplicantPatch(BaseModel):
+    applicant_count: int = Field(ge=0, le=999999)
+
+
+@router.post("/boards/{board_row_id}/applicants")
+async def update_board_applicants(
+    board_row_id: int,
+    payload: _BoardApplicantPatch,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_csm),
+) -> dict:
+    """Manual applicant count edit for a single board posting. Drives the
+    drawer's inline-edit affordance — LinkedIn (and every other board) is
+    manual-entry today; no auto-scrape exists. The job-level
+    total_applicants gets recomputed via JobCRUD.record_applicants so the
+    Performance board metrics stay consistent."""
+    row = await JobBoardCRUD.get_by_id(db, board_row_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="board row not found")
+    prev = row.applicant_count
+    row = await JobBoardCRUD.update_applicant_count(
+        db, row, applicant_count=payload.applicant_count
+    )
+    # Recompute the job-level total + at_risk_at / target_met_at ratchet.
+    job = await JobCRUD.get_by_id(db, row.prospect_company_job_id)
+    if job is not None:
+        await JobCRUD.record_applicants(
+            db, job, board=row.board, applicant_count=row.applicant_count
+        )
+    await JobHistoryCRUD.record(
+        db,
+        prospect_company_job_id=row.prospect_company_job_id,
+        field_name=f"board[{get_label(JOB_BOARDS, row.board)}].applicant_count",
+        from_value=str(prev),
+        to_value=str(row.applicant_count),
+    )
+    return ok(_serialize_board(row), message="applicants updated")
 
 
 @router.post("/{job_id}/applicants")

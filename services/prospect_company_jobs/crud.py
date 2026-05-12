@@ -317,6 +317,33 @@ class JobBoardCRUD:
         await db.refresh(row)
         return row
 
+    @staticmethod
+    async def mark_stopped(
+        db: AsyncSession, row: ProspectCompanyJobBoard
+    ) -> ProspectCompanyJobBoard:
+        """CSM clicked Halt on an active board posting. Same shape as
+        mark_removed (sets removed_at) but uses status=4 'stopped' so the
+        UI can distinguish 'manually halted by us' from 'pulled by the
+        board itself / failed' or 'never posted'."""
+        row.status = 4  # stopped
+        row.removed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(row)
+        return row
+
+    @staticmethod
+    async def update_applicant_count(
+        db: AsyncSession, row: ProspectCompanyJobBoard, *, applicant_count: int
+    ) -> ProspectCompanyJobBoard:
+        """Manual applicant-count edit on a single board posting. Lets the
+        CSM keep numbers fresh for boards we don't auto-scrape (which is
+        all of them today — LinkedIn included). Used by the drawer's
+        inline-edit affordance."""
+        row.applicant_count = max(0, int(applicant_count))
+        await db.commit()
+        await db.refresh(row)
+        return row
+
 
 class JobCandidateCRUD:
     @staticmethod

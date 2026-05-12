@@ -59,12 +59,17 @@ class JobOut(BaseModel):
     status_label: Optional[str] = None
     candidates_prepared: int
     posted_at: Optional[datetime]
+    opened_at: Optional[datetime] = None
     expectation_target: Optional[int]
     at_risk_at: Optional[datetime]
     target_met_at: Optional[datetime]
     total_applicants: int
     assigned_to_csm_user_id: Optional[int]
     posting_url: Optional[str] = None
+    source_url: Optional[str] = None
+    source: int = 0
+    source_label: Optional[str] = None
+    source_external_id: Optional[str] = None
     jd_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime

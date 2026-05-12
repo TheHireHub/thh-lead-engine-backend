@@ -43,13 +43,12 @@ _STAGE_CURIOUS = 1                # §6.2 FUNNEL_STAGES
 _COMPANY_SOURCE_SIGNUP = 2        # §6.4 COMPANY_SOURCES (2=signup)
 # Event types that signal L3 (OTP verified / company onboarded).
 _L3_EVENTS = {"otp_verified", "company_onboarded"}
-# L4 events — user moved past signup and is creating/publishing jobs.
-# We do not set otp_verified_at here (it's a separate milestone) but DO bump
-# prospects.first_job_created_at + jobs_created_count via set_first_job_created.
-# `job_step_advanced` fires at each current_step transition inside the wizard
-# (step 2 jd_fields_extracted, step 4 interview_config_saved, step 5
-# outreach_config_saved). The exact step + label lives in source_meta.
-_L4_EVENTS = {"job_draft_created", "job_step_advanced", "job_published"}
+# L4 events — user published a job. Bumps prospects.first_job_created_at +
+# jobs_created_count via set_first_job_created. Only `job_published` fires
+# now (draft + step events were removed per telegram-parity rule). The set
+# stays a set so a future telegram-paired event can be added without
+# rewriting the membership check.
+_L4_EVENTS = {"job_published"}
 
 
 def _extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
@@ -501,7 +500,11 @@ async def inbound_lead_event(
         # 6) Append signups row (one per touch — full event fidelity).
         signup_fields = dict(
             prospect_id=prospect.id,
-            email=email or f"unknown+{payload.dedup_key}@thh.internal",
+            # Use the real prospect email when the event itself didn't carry
+            # one (typical for L4 job_step_advanced fires that arrive with
+            # only thh_user_id). Falls back to a synthetic email only when
+            # the prospect has no email either (anon calendly case).
+            email=email or (prospect.email if prospect and prospect.email else f"unknown+{payload.dedup_key}@thh.internal"),
             name=" ".join(p for p in (payload.first_name, payload.last_name) if p) or None,
             company_name=payload.company_name,
             phone=payload.phone,
