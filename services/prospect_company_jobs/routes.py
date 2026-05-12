@@ -7,6 +7,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from database_connection.connection import get_db
 from services.admin_users.deps import (
     ROLE_ADMIN,
@@ -16,7 +18,10 @@ from services.admin_users.deps import (
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
+from services.candidate_outreach.auth import require_service_token
 from services.common.envelope import ok
+from services.companies.crud import CompanyCRUD
+from services.webhooks.crud import WebhookDeliveryCRUD
 
 from .crud import (
     JobBoardCRUD,
@@ -47,6 +52,7 @@ from .schemas import (
     CandidateNoteUpdate,
     CandidateOut,
     CandidateStatusUpdate,
+    InboundJobBoardEvent,
     JobBoardOut,
     JobCreate,
     JobDistributionRequest,
@@ -54,6 +60,7 @@ from .schemas import (
     JobOut,
     JobUpdate,
 )
+from .models import ProspectCompanyJob
 
 router = APIRouter(prefix="/api/prospect-company-jobs", tags=["prospect_company_jobs"])
 
@@ -243,6 +250,189 @@ async def create_job(payload: JobCreate, db: AsyncSession = Depends(get_db),
         after_json={"title": job.title, "company_id": job.company_id},
     )
     return ok(_serialize_job(job), message="job created")
+
+
+# ----------------------------------------------------- inbound (HH product)
+
+_JOB_SOURCE_THH_PRODUCT = 6           # JOB_SOURCES §6.20
+_WEBHOOK_PROVIDER_THH = 4             # WEBHOOK_PROVIDERS §6.12 (shared with signups inbound)
+_PAID_STATUS_PAID = 1                 # JOB_PAID_STATUSES §6.18
+_PAID_STATUS_NON_PAID = 2
+
+_PAID_SUB_STATUSES = {"active", "past_due"}
+_TRIAL_SUB_STATUSES = {"trialing", "trial"}
+
+
+def _resolve_paid_status(subscription_status: Optional[str]) -> int:
+    """Map a HH-BE subscription status string into the LEADS paid_status enum.
+
+    active / past_due → paid (1)
+    trialing / trial / null / cancelled / unknown → non_paid (2)
+    """
+    if not subscription_status:
+        return _PAID_STATUS_NON_PAID
+    return _PAID_STATUS_PAID if subscription_status.strip().lower() in _PAID_SUB_STATUSES else _PAID_STATUS_NON_PAID
+
+
+def _extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
+    if not url_or_domain:
+        return None
+    raw = url_or_domain.strip().lower()
+    if not raw:
+        return None
+    if "@" in raw and "://" not in raw:
+        raw = raw.split("@", 1)[1]
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if raw.startswith("www."):
+        raw = raw[4:]
+    return raw or None
+
+
+@router.post("/inbound")
+async def inbound_job_board_event(
+    payload: InboundJobBoardEvent,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+) -> dict:
+    """HH-BE posts here when a customer publishes a job on app.thehirehub.ai.
+
+    Idempotent on (source=6 thh_product, source_external_id=str(thh_job_id))
+    AND on (provider=4 thh_signup, external_event_id=dedup_key). The first
+    push creates the row; later pushes patch mutable fields (paid_status,
+    posting_url, location, title) without touching CSM-curated fields
+    (assigned_to_csm_user_id, expectation_target, notes, status).
+    """
+    # 1) Idempotency check via webhook_deliveries.
+    wd_row, was_duplicate = await WebhookDeliveryCRUD.record(
+        db,
+        provider=_WEBHOOK_PROVIDER_THH,
+        external_event_id=payload.dedup_key,
+        payload_json=payload.model_dump(mode="json"),
+    )
+    if was_duplicate:
+        return ok(
+            {"created": False, "job_id": None, "dedup_key": payload.dedup_key},
+            message="already_received",
+        )
+
+    try:
+        # 2) Resolve the LEADS company. HH posts always carry SOME identity
+        # (company_name + domain or website). If neither resolves, bail —
+        # ProspectCompanyJob.company_id is NOT NULL.
+        domain = _extract_domain(payload.company_domain) or _extract_domain(payload.company_website)
+        if not domain and not payload.company_name:
+            await WebhookDeliveryCRUD.mark_failed(db, wd_row, "no company identity in payload")
+            raise HTTPException(status_code=400, detail="company identity required")
+
+        company = None
+        if domain:
+            company, _created = await CompanyCRUD.get_or_create_by_domain(
+                db,
+                domain=domain,
+                name=payload.company_name or domain,
+                source=2,  # COMPANY_SOURCES §6.4 = signup
+            )
+
+        if company is None:
+            # No domain — anonymous internal promo? Use company_name as the
+            # display name with a synthetic domain so the FK resolves.
+            synthetic_domain = f"thh-internal+{payload.thh_company_id or payload.thh_job_id}.local"
+            company, _ = await CompanyCRUD.get_or_create_by_domain(
+                db,
+                domain=synthetic_domain,
+                name=payload.company_name or "Internal promo",
+                source=2,
+            )
+
+        # 3) Upsert on (source, source_external_id) UNIQUE.
+        existing_result = await db.execute(
+            select(ProspectCompanyJob).where(
+                ProspectCompanyJob.source == _JOB_SOURCE_THH_PRODUCT,
+                ProspectCompanyJob.source_external_id == str(payload.thh_job_id),
+                ProspectCompanyJob.deleted_at.is_(None),
+            )
+        )
+        job = existing_result.scalar_one_or_none()
+
+        paid_status = _resolve_paid_status(payload.subscription_status)
+
+        if job is None:
+            job_fields = {
+                "company_id": company.id,
+                "title": (payload.title or payload.job_code or "Untitled job")[:255],
+                "location": payload.location,
+                "open_count": payload.total_positions or 1,
+                "paid_status": paid_status,
+                "source": _JOB_SOURCE_THH_PRODUCT,
+                "source_url": payload.posting_url,
+                "source_external_id": str(payload.thh_job_id),
+                "posting_url": payload.posting_url,
+                "jd_url": payload.jd_url,
+                "posted_at": payload.published_at,
+                "status": 0,  # open
+            }
+            job = await JobCRUD.create(db, **job_fields)
+            await AuditLogCRUD.record(
+                db,
+                entity_type="prospect_company_job",
+                entity_id=job.id,
+                action="inbound_create",
+                after_json={
+                    "source": _JOB_SOURCE_THH_PRODUCT,
+                    "source_external_id": str(payload.thh_job_id),
+                    "is_internal": payload.is_internal,
+                    "plan_code": payload.plan_code,
+                    "subscription_status": payload.subscription_status,
+                },
+            )
+            created = True
+        else:
+            # Patch mutable fields. Never overwrite CSM-curated columns.
+            patch: dict = {}
+            if payload.title and not job.title.startswith("Untitled"):
+                # Keep CSM-edited title; only fill if it's still our default.
+                pass
+            elif payload.title:
+                patch["title"] = payload.title[:255]
+            if payload.location and not job.location:
+                patch["location"] = payload.location
+            if payload.posting_url and not job.posting_url:
+                patch["posting_url"] = payload.posting_url
+            if payload.jd_url and not job.jd_url:
+                patch["jd_url"] = payload.jd_url
+            if paid_status != job.paid_status:
+                patch["paid_status"] = paid_status
+            if payload.published_at and not job.posted_at:
+                patch["posted_at"] = payload.published_at
+            if patch:
+                job = await JobCRUD.update(db, job, **patch)
+                await AuditLogCRUD.record(
+                    db,
+                    entity_type="prospect_company_job",
+                    entity_id=job.id,
+                    action="inbound_update",
+                    after_json=patch,
+                )
+            created = False
+
+        await WebhookDeliveryCRUD.mark_processed(db, wd_row)
+        return ok(
+            {
+                "created": created,
+                "job_id": job.id,
+                "company_id": company.id,
+                "paid_status": paid_status,
+                "dedup_key": payload.dedup_key,
+            },
+            message="ingested",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await WebhookDeliveryCRUD.mark_failed(db, wd_row, str(exc)[:1000])
+        raise HTTPException(status_code=500, detail=f"ingest failed: {exc}")
 
 
 @router.patch("/{job_id}")

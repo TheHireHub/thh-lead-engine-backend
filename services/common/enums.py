@@ -164,6 +164,7 @@ JOB_SOURCES = {
     3: "linkedin",
     4: "careers_page",
     5: "other",
+    6: "thh_product",  # job published on app.thehirehub.ai, mirrored via /inbound
 }
 
 # §6.21 Job status
