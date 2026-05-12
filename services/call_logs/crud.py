@@ -49,6 +49,12 @@ def _called_at_local_date():
 #   2 converted | 3 lost | 4 unsubscribed
 EXCLUDED_STAGES = (2, 3, 4)
 
+# Channels excluded from the Caller queue (§6.3):
+#   13 hh_signup — product-driven signups on app.thehirehub.ai; these are
+#   inbound leads (already onboarded or about to be) and should NOT be cold-
+#   called by the BDR team. They surface on the /signups page instead.
+EXCLUDED_CHANNELS = (13,)
+
 
 def _next_open_callback_subq(*, caller_user_id: int | None = None):
     """Correlated subquery returning the next OPEN `callback_at` for a
@@ -251,6 +257,7 @@ class CallLogCRUD:
                 ),
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
+                Prospect.source_channel.not_in(EXCLUDED_CHANNELS),
             )
             .order_by(
                 next_cb.is_(None).asc(),
@@ -455,6 +462,7 @@ class CallLogCRUD:
             ),
             Prospect.deleted_at.is_(None),
             Prospect.stage.not_in(EXCLUDED_STAGES),
+            Prospect.source_channel.not_in(EXCLUDED_CHANNELS),
         )
         result = await db.execute(stmt)
         return int(result.scalar_one() or 0)
@@ -489,6 +497,7 @@ class CallLogCRUD:
                 ),
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
+                Prospect.source_channel.not_in(EXCLUDED_CHANNELS),
             )
             .order_by(
                 next_cb.is_(None).asc(),  # has callback first (False sorts before True)
@@ -511,6 +520,7 @@ class CallLogCRUD:
         stmt = select(func.count(Prospect.id)).where(
             Prospect.deleted_at.is_(None),
             Prospect.stage.not_in(EXCLUDED_STAGES),
+            Prospect.source_channel.not_in(EXCLUDED_CHANNELS),
         )
         result = await db.execute(stmt)
         return int(result.scalar_one() or 0)
@@ -528,6 +538,7 @@ class CallLogCRUD:
             .where(
                 Prospect.deleted_at.is_(None),
                 Prospect.stage.not_in(EXCLUDED_STAGES),
+                Prospect.source_channel.not_in(EXCLUDED_CHANNELS),
             )
             .order_by(
                 next_cb.is_(None).asc(),
