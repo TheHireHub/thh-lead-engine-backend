@@ -42,6 +42,10 @@ _STAGE_CURIOUS = 1                # §6.2 FUNNEL_STAGES
 _COMPANY_SOURCE_SIGNUP = 2        # §6.4 COMPANY_SOURCES (2=signup)
 # Event types that signal L3 (OTP verified / company onboarded).
 _L3_EVENTS = {"otp_verified", "company_onboarded"}
+# L4 events — user moved past signup and is creating/publishing jobs.
+# We do not set otp_verified_at here (it's a separate milestone) but DO bump
+# prospects.first_job_created_at + jobs_created_count via set_first_job_created.
+_L4_EVENTS = {"job_draft_created", "job_published"}
 
 
 def _extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
@@ -401,6 +405,19 @@ async def inbound_lead_event(
         is_l3 = payload.event_type in _L3_EVENTS
         if is_l3:
             await ProspectCRUD.set_registered(db, prospect)
+            if payload.thh_user_id and not prospect.thh_user_id:
+                await ProspectCRUD.set_thh_user_id(db, prospect, payload.thh_user_id)
+
+        # 5b) L4 milestones — bump first_job_created_at + jobs_created_count.
+        # The setter NULL-guards first_job_created_at (only sets first time),
+        # and updates count to whatever HH-BE supplies in source_meta.jobs_total.
+        is_l4 = payload.event_type in _L4_EVENTS
+        if is_l4:
+            _meta = payload.source_meta or {}
+            _count = int(_meta.get("jobs_total") or 1)
+            await ProspectCRUD.set_first_job_created(db, prospect, count=_count)
+            # Backfill thh_user_id if the L4 fire arrives before any L3 (e.g. a
+            # user who was created via google-signup with no separate OTP step).
             if payload.thh_user_id and not prospect.thh_user_id:
                 await ProspectCRUD.set_thh_user_id(db, prospect, payload.thh_user_id)
 
