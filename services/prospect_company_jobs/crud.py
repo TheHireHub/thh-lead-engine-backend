@@ -195,11 +195,21 @@ class JobCRUD:
         job.expectation_target = expectation_target
         job.at_risk_at = now + timedelta(days=days_threshold)
 
-        # Avoid duplicate (job, board) rows — uk_pcjb_job_board enforces this.
+        # Each posting attempt is its own row. We only skip when the
+        # board's LATEST row is still live (pending=0 or posted=1) — that
+        # means the CSM is already actively posting there, no need to
+        # duplicate. After a halt (status=4) or removed (3) or failed (2),
+        # a new attempt creates a fresh row.
         existing_rows = await JobBoardCRUD.list_for_job(db, job.id)
-        existing_boards = {r.board for r in existing_rows}
+        latest_by_board: dict[int, ProspectCompanyJobBoard] = {}
+        for r in existing_rows:
+            cur = latest_by_board.get(r.board)
+            if cur is None or r.created_at > cur.created_at:
+                latest_by_board[r.board] = r
+        LIVE_STATUSES = (0, 1)  # pending, posted
         for board in boards:
-            if board in existing_boards:
+            latest = latest_by_board.get(board)
+            if latest is not None and latest.status in LIVE_STATUSES:
                 continue
             db.add(
                 ProspectCompanyJobBoard(
@@ -270,11 +280,17 @@ class JobBoardCRUD:
     async def list_for_job(
         db: AsyncSession, job_id: int
     ) -> list[ProspectCompanyJobBoard]:
+        # Stable order: oldest first. With multiple rows per (job, board)
+        # (after the unique drop), the drawer renders top-to-bottom as
+        # 'first attempt → latest attempt' which reads naturally as a
+        # history. Group-by-board on the FE if we ever want to collapse.
         result = await db.execute(
-            select(ProspectCompanyJobBoard).where(
+            select(ProspectCompanyJobBoard)
+            .where(
                 ProspectCompanyJobBoard.prospect_company_job_id == job_id,
                 ProspectCompanyJobBoard.deleted_at.is_(None),
             )
+            .order_by(ProspectCompanyJobBoard.created_at.asc(), ProspectCompanyJobBoard.id.asc())
         )
         return list(result.scalars().all())
 
