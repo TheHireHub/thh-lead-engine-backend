@@ -218,6 +218,7 @@ _OUTCOME_KEYS: list[str] = [
     "demo_scheduled",
     "demo_attended",
     "demo_no_show",
+    "converted",
 ]
 
 

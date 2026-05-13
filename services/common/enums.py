@@ -204,6 +204,7 @@ CALL_OUTCOMES = {
     4: "demo_scheduled",
     5: "demo_attended",
     6: "demo_no_show",
+    7: "converted",
 }
 
 # §6.27 Job board
