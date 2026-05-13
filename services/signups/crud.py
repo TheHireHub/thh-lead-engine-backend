@@ -42,6 +42,41 @@ class SignupCRUD:
         return await SignupCRUD.list_filtered(db, limit=limit)
 
     @staticmethod
+    async def list_for_lead(
+        db: AsyncSession,
+        *,
+        prospect_id: Optional[int],
+        email: Optional[str],
+        limit: int = 200,
+    ) -> list[Signup]:
+        """Every signup event for a single lead, oldest→newest.
+
+        Mirrors the FE grouping rule in `/signups`: when the row has a
+        prospect_id, the lead is the union of all signups carrying that id;
+        otherwise the lead is keyed by email and only un-attached signups
+        belong to it. Powers the drawer Timeline so sales can see how the
+        lead progressed before its latest event.
+        """
+        if prospect_id is not None:
+            stmt = (
+                select(Signup)
+                .where(Signup.prospect_id == prospect_id)
+                .order_by(Signup.created_at.asc())
+                .limit(limit)
+            )
+        elif email:
+            stmt = (
+                select(Signup)
+                .where(Signup.email == email, Signup.prospect_id.is_(None))
+                .order_by(Signup.created_at.asc())
+                .limit(limit)
+            )
+        else:
+            return []
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
     async def create(db: AsyncSession, **fields) -> Signup:
         signup = Signup(**fields)
         db.add(signup)

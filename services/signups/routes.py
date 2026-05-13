@@ -135,8 +135,15 @@ async def get_signup_detail(
         company = company_result.scalar_one_or_none()
 
     signup_dict = _serialize(row)
+    # Full event series for this lead — drawer Timeline shows every recorded
+    # touch (partial_signup → OTP requested → verified → onboarded → published),
+    # not just the latest. Cap at 200 — anything past that is noise.
+    events_rows = await SignupCRUD.list_for_lead(
+        db, prospect_id=row.prospect_id, email=row.email, limit=200
+    )
     detail = {
         "signup": signup_dict,
+        "events": [_serialize(e) for e in events_rows],
         "prospect": None,
         "company": None,
     }
