@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.crud import AdminUserCRUD
 from services.admin_users.deps import (
+    ROLE_ADMIN,
     ROLE_CALLER,
     require_admin,
     require_dashboard_read,
@@ -93,18 +94,24 @@ async def _company_sticky_owner(
     return int(owner)
 
 
-async def _ensure_owner_is_caller(db: AsyncSession, owner_user_id: int) -> None:
-    """Reject 422 if owner_user_id does not reference an active caller (role=4).
+_OWNER_ELIGIBLE_ROLES = (ROLE_ADMIN, ROLE_CALLER)
 
-    Ownership is the queue-work assignment, so only callers can hold it.
-    Admin/growth/bdr/sales/csm/viewer manage the queue but never work it.
-    NULL ownership is legal and bypasses this check at the call site.
+
+async def _ensure_owner_is_caller(db: AsyncSession, owner_user_id: int) -> None:
+    """Reject 422 if owner_user_id does not reference a user eligible to
+    own leads. Eligible roles: ADMIN (0) and CALLER (4).
+
+    Callers own leads because they work the queue. Admins are allowed too
+    so a manager can self-assign a lead for personal follow-up without
+    cluttering a caller's queue. Other roles (growth/bdr/sales/csm/viewer)
+    manage but cannot own. NULL ownership is legal and bypasses this
+    check at the call site.
     """
     target = await AdminUserCRUD.get_by_id(db, owner_user_id)
-    if target is None or target.role != ROLE_CALLER:
+    if target is None or target.role not in _OWNER_ELIGIBLE_ROLES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="owner_user_id must reference an active caller",
+            detail="owner_user_id must reference an admin or caller",
         )
 
 
