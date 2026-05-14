@@ -15,6 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
+from services.admin_users.deps import require_admin
+from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
 from services.common.envelope import fail, ok
@@ -402,3 +404,32 @@ async def apollo_webhook(
         {"duplicate": False, "id": row.id, "prospect_id": prospect_id},
         message="apollo webhook processed",
     )
+
+
+# --- admin-only inspection endpoints --------------------------------------
+
+@router.get("/deliveries/failed")
+async def list_failed_deliveries(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _user: AdminUser = Depends(require_admin),
+) -> dict:
+    """Admin-only. Lists the most recent failed webhook deliveries +
+    a total count. Powers the management-dashboard alert widget so
+    silent push drops surface within hours instead of days."""
+    rows = await WebhookDeliveryCRUD.list_failed(db, limit=limit)
+    count = await WebhookDeliveryCRUD.count_failed(db)
+    items: list[dict] = []
+    for r in rows:
+        # Truncate error_message — full text can be a 1k stack trace, not
+        # useful on a dashboard row. Full text remains in the DB column.
+        err = r.error_message or ""
+        items.append({
+            "id": r.id,
+            "provider": r.provider,
+            "external_event_id": r.external_event_id,
+            "received_at": r.received_at.isoformat() if r.received_at else None,
+            "processed_at": r.processed_at.isoformat() if r.processed_at else None,
+            "error_message": err[:240],
+        })
+    return ok({"count": count, "items": items})
