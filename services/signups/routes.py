@@ -24,6 +24,8 @@ from services.landing_pages.crud import (
     LandingPageVariantCRUD,
     LandingPageVisitCRUD,
 )
+from services.prospect_company_jobs.crud import JobCRUD
+from services.prospect_company_jobs.models import ProspectCompanyJob
 from services.prospects.crud import ProspectCRUD
 from services.prospects.dedupe import find_existing
 from services.prospects.models import Prospect
@@ -141,9 +143,41 @@ async def get_signup_detail(
     events_rows = await SignupCRUD.list_for_lead(
         db, prospect_id=row.prospect_id, email=row.email, limit=200
     )
+
+    # Resolve the company for the "Linked Jobs" section. Primary: prospect's
+    # own company_id. Fallback: lookup company by the lead's email domain so
+    # leads whose `company_id` was never backfilled (e.g. partial_signup that
+    # never reached company_onboarded, or a dropped L4 push) still see the
+    # job that exists under their company. Without this fallback, Sales sees
+    # a "Partial" lead with no hint that a job is already live for the same
+    # company.
+    target_company: Optional[Company] = company
+    if target_company is None and row.email and "@" in row.email:
+        candidate_domain = row.email.split("@", 1)[1].strip().lower()
+        if candidate_domain:
+            target_company = await CompanyCRUD.get_by_domain(db, candidate_domain)
+
+    jobs_payload: list[dict] = []
+    if target_company is not None:
+        jobs_rows = await JobCRUD.list_for_company(db, target_company.id)
+        for j in jobs_rows:
+            jobs_payload.append({
+                "id": j.id,
+                "title": j.title,
+                "status": j.status,
+                "paid_status": j.paid_status,
+                "source": j.source,
+                "posted_at": j.posted_at.isoformat() if j.posted_at else None,
+                "opened_at": j.opened_at.isoformat() if j.opened_at else None,
+                "total_applicants": j.total_applicants,
+                "expectation_target": j.expectation_target,
+                "company_id": j.company_id,
+            })
+
     detail = {
         "signup": signup_dict,
         "events": [_serialize(e) for e in events_rows],
+        "jobs": jobs_payload,
         "prospect": None,
         "company": None,
     }
