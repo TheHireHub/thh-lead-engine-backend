@@ -84,20 +84,34 @@ class CompanyCRUD:
         source: int = 1,
         **defaults,
     ) -> tuple[Company, bool]:
-        """Idempotent upsert by domain. Returns (company, created)."""
+        """Idempotent upsert by domain. Returns (company, created).
+
+        The duplicate-domain race recovery uses a SAVEPOINT (`begin_nested`)
+        rather than a top-level `db.rollback()`. A top-level rollback expires
+        EVERY ORM instance attached to the outer session — even those owned
+        by the caller (e.g. the `Prospect` mid-event). Any subsequent sync
+        attribute access on those expired instances triggers an implicit
+        lazy-load, which is not allowed inside an async context and raises
+        `MissingGreenlet`. The SAVEPOINT scopes the rollback to just our
+        attempted INSERT.
+        """
         existing = await CompanyCRUD.get_by_domain(db, domain)
         if existing:
             return existing, False
-        company = Company(name=name, domain=domain, source=source, **defaults)
-        db.add(company)
         try:
-            await db.commit()
+            async with db.begin_nested():
+                company = Company(name=name, domain=domain, source=source, **defaults)
+                db.add(company)
+                await db.flush()
         except IntegrityError:
-            await db.rollback()
+            # Savepoint rolled back; the outer transaction (and outer ORM
+            # instances) is untouched. Another concurrent writer won the
+            # race — re-read to return their row.
             existing = await CompanyCRUD.get_by_domain(db, domain)
             if existing:
                 return existing, False
             raise
+        await db.commit()
         await db.refresh(company)
         return company, True
 

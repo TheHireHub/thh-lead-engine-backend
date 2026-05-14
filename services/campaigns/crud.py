@@ -135,13 +135,18 @@ class CampaignProspectCRUD:
         added = 0
         skipped = 0
         for pid in prospect_ids:
-            row = CampaignProspect(campaign_id=campaign_id, prospect_id=pid)
-            db.add(row)
             try:
-                await db.flush()
+                async with db.begin_nested():
+                    # SAVEPOINT per-prospect — without this, hitting a single
+                    # duplicate rolls back EVERY prior insert in this batch
+                    # (and expires every ORM instance the caller holds,
+                    # triggering MissingGreenlet on later sync attribute
+                    # access). Scoping to a savepoint keeps the rest atomic.
+                    row = CampaignProspect(campaign_id=campaign_id, prospect_id=pid)
+                    db.add(row)
+                    await db.flush()
                 added += 1
             except IntegrityError:
-                await db.rollback()
                 skipped += 1
         await db.commit()
         return added, skipped
