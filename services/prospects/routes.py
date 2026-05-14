@@ -504,9 +504,9 @@ async def create_prospect(
     # it under the rep filter.
     if user.role == ROLE_CALLER:
         fields.setdefault("owner_user_id", user.id)
-    # owner_user_id must reference an active CALLER (role=4). Non-callers
-    # (admin, growth, bdr, sales, csm, viewer) own nothing — they manage
-    # the queue, they don't work it. NULL = unassigned (legal).
+    # owner_user_id must reference an ADMIN (0) or CALLER (4) per
+    # _OWNER_ELIGIBLE_ROLES. Admins may self-assign for personal follow-up.
+    # Growth/bdr/sales/csm/viewer manage but don't own. NULL = unassigned (legal).
     proposed_owner = fields.get("owner_user_id")
     if proposed_owner is not None:
         await _ensure_owner_is_caller(db, proposed_owner)
@@ -549,10 +549,10 @@ async def update_prospect(
     # was later deleted). Phone is excluded for the same reason as the
     # CSV import: corporate switchboards are shared.
     fields_in = payload.model_dump(exclude_unset=True)
-    # Reassign target validation: owner_user_id must be an active CALLER
-    # (role=4) or NULL (unassigned). Admins managing the queue can't pull
-    # leads onto themselves — they assign to callers. This is the
-    # canonical RBAC for ownership and replaces the FE-only filter.
+    # Reassign target validation: owner_user_id must be an ADMIN (0) or
+    # CALLER (4) per _OWNER_ELIGIBLE_ROLES, or NULL (unassigned). Other
+    # roles manage but don't own. Admin-owned leads stay invisible to the
+    # caller queue (which filters owner == caller_user_id).
     if "owner_user_id" in fields_in and fields_in["owner_user_id"] is not None:
         await _ensure_owner_is_caller(db, fields_in["owner_user_id"])
 

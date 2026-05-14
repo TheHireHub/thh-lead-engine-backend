@@ -618,16 +618,24 @@ async def delete_lead(
         raise HTTPException(status_code=404, detail="signup not found")
 
     # Resolve every signup row that belongs to this lead, matching the FE
-    # grouping rule exactly.
+    # grouping rule exactly. Refuse to fire if neither key is available —
+    # without a concrete prospect_id OR a non-empty email we'd issue a
+    # destructive `WHERE prospect_id IS NULL AND email IS NULL` query that
+    # could mass-delete legitimate orphan rows from other broken pushes.
     if anchor.prospect_id is not None:
         stmt = delete(Signup).where(Signup.prospect_id == anchor.prospect_id)
         bound = {"prospect_id": anchor.prospect_id}
-    else:
+    elif anchor.email:
         stmt = delete(Signup).where(
             Signup.email == anchor.email,
             Signup.prospect_id.is_(None),
         )
         bound = {"email": anchor.email}
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="signup has neither prospect_id nor email — refuse to delete",
+        )
 
     result = await db.execute(stmt)
     deleted_signups = int(result.rowcount or 0)
