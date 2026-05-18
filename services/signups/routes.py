@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
@@ -32,7 +32,6 @@ from services.prospects.models import Prospect
 from services.webhooks.crud import WebhookDeliveryCRUD
 
 from .crud import SignupCRUD
-from .models import Signup
 from .enums import SIGNUP_REQUEST_TYPES, get_label
 from .schemas import InboundLeadEvent, OtpVerifyPayload, SignupCreate, SignupOut
 
@@ -606,53 +605,20 @@ async def delete_lead(
     user: AdminUser = Depends(require_admin),
 ) -> dict:
     """Admin-only nuke for the entire lead grouping behind one signup row.
-
-    Test data cleanup affordance — Sales asked for a one-click "remove this
-    lead so it stops cluttering the list" button. Deletes every signup
-    event that the /signups page would group under this row (same
-    prospect_id, else same email when prospect_id is NULL), then
-    soft-deletes the prospect if attached. No undo.
-    """
+    Test-data cleanup affordance — Sales asked for a one-click "remove this
+    lead so it stops cluttering the list" button. Delegates the SQL +
+    soft-delete chain to `SignupCRUD.delete_lead_grouping` so the route
+    stays thin."""
     anchor = await SignupCRUD.get_by_id(db, signup_id)
     if anchor is None:
         raise HTTPException(status_code=404, detail="signup not found")
 
-    # Resolve every signup row that belongs to this lead, matching the FE
-    # grouping rule exactly. Refuse to fire if neither key is available —
-    # without a concrete prospect_id OR a non-empty email we'd issue a
-    # destructive `WHERE prospect_id IS NULL AND email IS NULL` query that
-    # could mass-delete legitimate orphan rows from other broken pushes.
-    if anchor.prospect_id is not None:
-        stmt = delete(Signup).where(Signup.prospect_id == anchor.prospect_id)
-        bound = {"prospect_id": anchor.prospect_id}
-    elif anchor.email:
-        stmt = delete(Signup).where(
-            Signup.email == anchor.email,
-            Signup.prospect_id.is_(None),
-        )
-        bound = {"email": anchor.email}
-    else:
+    result = await SignupCRUD.delete_lead_grouping(db, anchor)
+    if not result["bound"]:
         raise HTTPException(
             status_code=422,
             detail="signup has neither prospect_id nor email — refuse to delete",
         )
-
-    result = await db.execute(stmt)
-    deleted_signups = int(result.rowcount or 0)
-
-    deleted_prospect_id: int | None = None
-    if anchor.prospect_id is not None:
-        from services.prospects.models import Prospect
-        p_result = await db.execute(
-            select(Prospect).where(Prospect.id == anchor.prospect_id)
-        )
-        prospect = p_result.scalar_one_or_none()
-        if prospect is not None and prospect.deleted_at is None:
-            from services.prospects.crud import ProspectCRUD
-            await ProspectCRUD.soft_delete(db, prospect)
-            deleted_prospect_id = prospect.id
-
-    await db.commit()
 
     await AuditLogCRUD.record(
         db,
@@ -661,16 +627,16 @@ async def delete_lead(
         entity_id=signup_id,
         action="lead_delete",
         after_json={
-            **bound,
-            "deleted_signups": deleted_signups,
-            "deleted_prospect_id": deleted_prospect_id,
+            **result["bound"],
+            "deleted_signups": result["deleted_signups"],
+            "deleted_prospect_id": result["deleted_prospect_id"],
         },
     )
 
     return ok(
         {
-            "deleted_signups": deleted_signups,
-            "deleted_prospect_id": deleted_prospect_id,
+            "deleted_signups": result["deleted_signups"],
+            "deleted_prospect_id": result["deleted_prospect_id"],
         },
         message="lead deleted",
     )
