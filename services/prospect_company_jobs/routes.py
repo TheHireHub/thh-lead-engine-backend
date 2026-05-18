@@ -738,12 +738,12 @@ async def update_board_applicants(
     row = await JobBoardCRUD.update_applicant_count(
         db, row, applicant_count=payload.applicant_count
     )
-    # Recompute the job-level total + at_risk_at / target_met_at ratchet.
+    # Recompute the job-level total + target_met_at ratchet. The board
+    # row's applicant_count was already saved above (by row id); this
+    # helper just sums all current rows for this job.
     job = await JobCRUD.get_by_id(db, row.prospect_company_job_id)
     if job is not None:
-        await JobCRUD.record_applicants(
-            db, job, board=row.board, applicant_count=row.applicant_count
-        )
+        await JobCRUD.record_applicants(db, job)
     await JobHistoryCRUD.record(
         db,
         prospect_company_job_id=row.prospect_company_job_id,
@@ -765,15 +765,31 @@ async def record_applicants(
     Set the per-board applicant count and recompute total_applicants.
     Sets target_met_at once on the first time total >= expectation_target
     (Arch-41 one-way ratchet).
+
+    With multiple postings per (job, board) legal (re-post after halt), we
+    target the LATEST live row for the board. Callers that need to edit a
+    specific historical posting should use `POST /boards/{row_id}/applicants`.
     """
     job = await JobCRUD.get_by_id(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
 
-    was_met = job.target_met_at is not None
-    job = await JobCRUD.record_applicants(
-        db, job, board=payload.board, applicant_count=payload.applicant_count
+    # Pick the most recent non-deleted board row for this (job, board).
+    all_rows = await JobBoardCRUD.list_for_job(db, job.id)
+    target_row = next(
+        (r for r in reversed(all_rows) if r.board == payload.board),
+        None,
     )
+    if target_row is None:
+        raise HTTPException(
+            status_code=404, detail=f"no board posting for board={payload.board}"
+        )
+    await JobBoardCRUD.update_applicant_count(
+        db, target_row, applicant_count=payload.applicant_count
+    )
+
+    was_met = job.target_met_at is not None
+    job = await JobCRUD.record_applicants(db, job)
     if not was_met and job.target_met_at is not None:
         await AuditLogCRUD.record(
             db,

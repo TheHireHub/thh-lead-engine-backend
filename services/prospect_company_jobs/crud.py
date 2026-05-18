@@ -227,26 +227,23 @@ class JobCRUD:
     async def record_applicants(
         db: AsyncSession,
         job: ProspectCompanyJob,
-        *,
-        board: int,
-        applicant_count: int,
     ) -> ProspectCompanyJob:
         """
-        Set per-board applicant count + recompute total_applicants.
-        Apply Arch-41 one-way ratchet: if total ever crosses target, set
-        target_met_at once and never clear it.
-        """
-        result = await db.execute(
-            select(ProspectCompanyJobBoard).where(
-                ProspectCompanyJobBoard.prospect_company_job_id == job.id,
-                ProspectCompanyJobBoard.board == board,
-            )
-        )
-        board_row = result.scalar_one_or_none()
-        if board_row is not None:
-            board_row.applicant_count = applicant_count
+        Recompute total_applicants from the (live) board-posting rows and
+        apply the Arch-41 one-way ratchet: if the total ever crosses target,
+        set `target_met_at` once and never clear it.
 
-        # Recompute aggregate.
+        Used after a per-board applicant count is edited. The board row
+        itself is updated by the caller (route uses `JobBoardCRUD
+        .update_applicant_count(row, ...)` keyed by row_id); this helper
+        only owns the aggregate + ratchet.
+
+        Originally took `(board, applicant_count)` and ran a sub-select to
+        find "the row for this (job, board)" — that broke after the
+        UNIQUE(job, board) drop made multiple postings legal per board
+        (MultipleResultsFound). The fix: this helper no longer touches
+        any row; it just sums everything via `list_for_job`.
+        """
         all_rows = await JobBoardCRUD.list_for_job(db, job.id)
         job.total_applicants = sum(r.applicant_count for r in all_rows)
 
