@@ -19,6 +19,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .models import WebhookDelivery
 
 
+def _reset_for_replay(
+    row: WebhookDelivery, payload_json: dict, signature: Optional[str]
+) -> None:
+    """In-place reset of a failed (status=2) delivery so its dedup_key can
+    re-ingest. Caller commits."""
+    row.status = 0
+    row.error_message = None
+    row.processed_at = None
+    row.payload_json = payload_json
+    if signature is not None:
+        row.signature = signature
+
+
 class WebhookDeliveryCRUD:
     @staticmethod
     async def get_by_external_id(
@@ -52,13 +65,7 @@ class WebhookDeliveryCRUD:
         existing = await WebhookDeliveryCRUD.get_by_external_id(db, provider, external_event_id)
         if existing is not None:
             if existing.status == 2:
-                # Reset failure state and let the caller re-process.
-                existing.status = 0
-                existing.error_message = None
-                existing.processed_at = None
-                existing.payload_json = payload_json
-                if signature is not None:
-                    existing.signature = signature
+                _reset_for_replay(existing, payload_json, signature)
                 await db.commit()
                 await db.refresh(existing)
                 return existing, False
