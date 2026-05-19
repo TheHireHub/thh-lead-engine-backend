@@ -20,6 +20,7 @@ from services.candidate_outreach.auth import (
     require_service_token_with_env,
 )
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 from services.companies.crud import CompanyCRUD
 from services.companies.models import Company
 from services.integrations import telegram, thh_backend
@@ -95,6 +96,7 @@ async def list_signups(
     otp_verified: Optional[bool] = None,
     limit: int = 100,
     offset: int = 0,
+    environment: Optional[int] = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_internal),
 ) -> dict:
@@ -104,6 +106,7 @@ async def list_signups(
         otp_verified=otp_verified,
         limit=limit,
         offset=offset,
+        environment=environment,
     )
     return ok([_serialize(s) for s in rows])
 
