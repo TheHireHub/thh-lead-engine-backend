@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from services.prospects.models import Prospect
 
 from .models import Signup
 
@@ -25,6 +27,7 @@ class SignupCRUD:
         otp_verified: Optional[bool] = None,
         limit: int = 100,
         offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[Signup]:
         stmt = select(Signup)
         if request_type is not None:
@@ -33,6 +36,20 @@ class SignupCRUD:
             stmt = stmt.where(Signup.otp_verified_at.is_not(None))
         elif otp_verified is False:
             stmt = stmt.where(Signup.otp_verified_at.is_(None))
+        # Env is held on the linked Prospect (signups don't carry their own
+        # column). LEFT JOIN so anonymous LP submissions (prospect_id IS NULL)
+        # still surface in both views — treat them as legacy NULL rows per
+        # the locked plan.
+        if environment is not None:
+            stmt = stmt.outerjoin(
+                Prospect, Signup.prospect_id == Prospect.id
+            ).where(
+                or_(
+                    Signup.prospect_id.is_(None),
+                    Prospect.environment == environment,
+                    Prospect.environment.is_(None),
+                )
+            )
         stmt = stmt.order_by(Signup.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())
