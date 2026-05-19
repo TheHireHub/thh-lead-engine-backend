@@ -16,6 +16,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
+
 from .models import Campaign, CampaignEvent, CampaignProspect
 
 
@@ -34,12 +36,16 @@ class CampaignCRUD:
         channel: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[Campaign]:
         stmt = select(Campaign).where(Campaign.deleted_at.is_(None))
         if status is not None:
             stmt = stmt.where(Campaign.status == status)
         if channel is not None:
             stmt = stmt.where(Campaign.channel == channel)
+        env_clause = env_filter_clause(Campaign.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(Campaign.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())
@@ -135,13 +141,18 @@ class CampaignProspectCRUD:
         added = 0
         skipped = 0
         for pid in prospect_ids:
-            row = CampaignProspect(campaign_id=campaign_id, prospect_id=pid)
-            db.add(row)
             try:
-                await db.flush()
+                async with db.begin_nested():
+                    # SAVEPOINT per-prospect — without this, hitting a single
+                    # duplicate rolls back EVERY prior insert in this batch
+                    # (and expires every ORM instance the caller holds,
+                    # triggering MissingGreenlet on later sync attribute
+                    # access). Scoping to a savepoint keeps the rest atomic.
+                    row = CampaignProspect(campaign_id=campaign_id, prospect_id=pid)
+                    db.add(row)
+                    await db.flush()
                 added += 1
             except IntegrityError:
-                await db.rollback()
                 skipped += 1
         await db.commit()
         return added, skipped

@@ -19,6 +19,8 @@ from typing import Iterable, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
+
 from .models import (
     ProspectCompanyJob,
     ProspectCompanyJobBoard,
@@ -79,6 +81,7 @@ class JobCRUD:
         assigned_to_csm_user_id: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[ProspectCompanyJob]:
         """Combined filter for the CSM Board."""
         stmt = select(ProspectCompanyJob).where(ProspectCompanyJob.deleted_at.is_(None))
@@ -96,6 +99,9 @@ class JobCRUD:
             stmt = stmt.where(
                 ProspectCompanyJob.assigned_to_csm_user_id == assigned_to_csm_user_id
             )
+        env_clause = env_filter_clause(ProspectCompanyJob.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(ProspectCompanyJob.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())
@@ -195,11 +201,21 @@ class JobCRUD:
         job.expectation_target = expectation_target
         job.at_risk_at = now + timedelta(days=days_threshold)
 
-        # Avoid duplicate (job, board) rows — uk_pcjb_job_board enforces this.
+        # Each posting attempt is its own row. We only skip when the
+        # board's LATEST row is still live (pending=0 or posted=1) — that
+        # means the CSM is already actively posting there, no need to
+        # duplicate. After a halt (status=4) or removed (3) or failed (2),
+        # a new attempt creates a fresh row.
         existing_rows = await JobBoardCRUD.list_for_job(db, job.id)
-        existing_boards = {r.board for r in existing_rows}
+        latest_by_board: dict[int, ProspectCompanyJobBoard] = {}
+        for r in existing_rows:
+            cur = latest_by_board.get(r.board)
+            if cur is None or r.created_at > cur.created_at:
+                latest_by_board[r.board] = r
+        LIVE_STATUSES = (0, 1)  # pending, posted
         for board in boards:
-            if board in existing_boards:
+            latest = latest_by_board.get(board)
+            if latest is not None and latest.status in LIVE_STATUSES:
                 continue
             db.add(
                 ProspectCompanyJobBoard(
@@ -217,26 +233,23 @@ class JobCRUD:
     async def record_applicants(
         db: AsyncSession,
         job: ProspectCompanyJob,
-        *,
-        board: int,
-        applicant_count: int,
     ) -> ProspectCompanyJob:
         """
-        Set per-board applicant count + recompute total_applicants.
-        Apply Arch-41 one-way ratchet: if total ever crosses target, set
-        target_met_at once and never clear it.
-        """
-        result = await db.execute(
-            select(ProspectCompanyJobBoard).where(
-                ProspectCompanyJobBoard.prospect_company_job_id == job.id,
-                ProspectCompanyJobBoard.board == board,
-            )
-        )
-        board_row = result.scalar_one_or_none()
-        if board_row is not None:
-            board_row.applicant_count = applicant_count
+        Recompute total_applicants from the (live) board-posting rows and
+        apply the Arch-41 one-way ratchet: if the total ever crosses target,
+        set `target_met_at` once and never clear it.
 
-        # Recompute aggregate.
+        Used after a per-board applicant count is edited. The board row
+        itself is updated by the caller (route uses `JobBoardCRUD
+        .update_applicant_count(row, ...)` keyed by row_id); this helper
+        only owns the aggregate + ratchet.
+
+        Originally took `(board, applicant_count)` and ran a sub-select to
+        find "the row for this (job, board)" — that broke after the
+        UNIQUE(job, board) drop made multiple postings legal per board
+        (MultipleResultsFound). The fix: this helper no longer touches
+        any row; it just sums everything via `list_for_job`.
+        """
         all_rows = await JobBoardCRUD.list_for_job(db, job.id)
         job.total_applicants = sum(r.applicant_count for r in all_rows)
 
@@ -270,11 +283,17 @@ class JobBoardCRUD:
     async def list_for_job(
         db: AsyncSession, job_id: int
     ) -> list[ProspectCompanyJobBoard]:
+        # Stable order: oldest first. With multiple rows per (job, board)
+        # (after the unique drop), the drawer renders top-to-bottom as
+        # 'first attempt → latest attempt' which reads naturally as a
+        # history. Group-by-board on the FE if we ever want to collapse.
         result = await db.execute(
-            select(ProspectCompanyJobBoard).where(
+            select(ProspectCompanyJobBoard)
+            .where(
                 ProspectCompanyJobBoard.prospect_company_job_id == job_id,
                 ProspectCompanyJobBoard.deleted_at.is_(None),
             )
+            .order_by(ProspectCompanyJobBoard.created_at.asc(), ProspectCompanyJobBoard.id.asc())
         )
         return list(result.scalars().all())
 

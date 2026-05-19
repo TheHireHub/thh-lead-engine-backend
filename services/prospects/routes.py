@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database_connection.connection import get_db
 from services.admin_users.crud import AdminUserCRUD
 from services.admin_users.deps import (
+    ROLE_ADMIN,
     ROLE_CALLER,
     require_admin,
     require_dashboard_read,
@@ -25,6 +26,7 @@ from services.call_logs.crud import CallLogCRUD
 from services.call_logs.enums import CALL_OUTCOMES
 from services.call_logs.enums import get_label as get_outcome_label
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 from services.email_replies.enums import (
     REPLY_CLASSIFICATIONS,
     REPLY_CLASSIFIED_BY,
@@ -93,18 +95,24 @@ async def _company_sticky_owner(
     return int(owner)
 
 
-async def _ensure_owner_is_caller(db: AsyncSession, owner_user_id: int) -> None:
-    """Reject 422 if owner_user_id does not reference an active caller (role=4).
+_OWNER_ELIGIBLE_ROLES = (ROLE_ADMIN, ROLE_CALLER)
 
-    Ownership is the queue-work assignment, so only callers can hold it.
-    Admin/growth/bdr/sales/csm/viewer manage the queue but never work it.
-    NULL ownership is legal and bypasses this check at the call site.
+
+async def _ensure_owner_is_caller(db: AsyncSession, owner_user_id: int) -> None:
+    """Reject 422 if owner_user_id does not reference a user eligible to
+    own leads. Eligible roles: ADMIN (0) and CALLER (4).
+
+    Callers own leads because they work the queue. Admins are allowed too
+    so a manager can self-assign a lead for personal follow-up without
+    cluttering a caller's queue. Other roles (growth/bdr/sales/csm/viewer)
+    manage but cannot own. NULL ownership is legal and bypasses this
+    check at the call site.
     """
     target = await AdminUserCRUD.get_by_id(db, owner_user_id)
-    if target is None or target.role != ROLE_CALLER:
+    if target is None or target.role not in _OWNER_ELIGIBLE_ROLES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="owner_user_id must reference an active caller",
+            detail="owner_user_id must reference an admin or caller",
         )
 
 
@@ -182,6 +190,7 @@ async def list_prospects(
     stage: int | None = None,
     limit: int = 100,
     offset: int = 0,
+    environment: int | None = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
@@ -191,7 +200,9 @@ async def list_prospects(
     no N+1) so the FE Prospects list can render the call-stage chip
     without a second round-trip. See BACKEND_CHANGES_PENDING.md item 9b.
     """
-    prospects = await ProspectCRUD.list_by_stage(db, stage=stage, limit=limit, offset=offset)
+    prospects = await ProspectCRUD.list_by_stage(
+        db, stage=stage, limit=limit, offset=offset, environment=environment
+    )
     owner_ids = [p.owner_user_id for p in prospects if p.owner_user_id is not None]
     owner_names = await AdminUserCRUD.names_by_ids(db, owner_ids)
     rows = [_serialize(p, owner_names) for p in prospects]
@@ -497,9 +508,9 @@ async def create_prospect(
     # it under the rep filter.
     if user.role == ROLE_CALLER:
         fields.setdefault("owner_user_id", user.id)
-    # owner_user_id must reference an active CALLER (role=4). Non-callers
-    # (admin, growth, bdr, sales, csm, viewer) own nothing — they manage
-    # the queue, they don't work it. NULL = unassigned (legal).
+    # owner_user_id must reference an ADMIN (0) or CALLER (4) per
+    # _OWNER_ELIGIBLE_ROLES. Admins may self-assign for personal follow-up.
+    # Growth/bdr/sales/csm/viewer manage but don't own. NULL = unassigned (legal).
     proposed_owner = fields.get("owner_user_id")
     if proposed_owner is not None:
         await _ensure_owner_is_caller(db, proposed_owner)
@@ -542,10 +553,10 @@ async def update_prospect(
     # was later deleted). Phone is excluded for the same reason as the
     # CSV import: corporate switchboards are shared.
     fields_in = payload.model_dump(exclude_unset=True)
-    # Reassign target validation: owner_user_id must be an active CALLER
-    # (role=4) or NULL (unassigned). Admins managing the queue can't pull
-    # leads onto themselves — they assign to callers. This is the
-    # canonical RBAC for ownership and replaces the FE-only filter.
+    # Reassign target validation: owner_user_id must be an ADMIN (0) or
+    # CALLER (4) per _OWNER_ELIGIBLE_ROLES, or NULL (unassigned). Other
+    # roles manage but don't own. Admin-owned leads stay invisible to the
+    # caller queue (which filters owner == caller_user_id).
     if "owner_user_id" in fields_in and fields_in["owner_user_id"] is not None:
         await _ensure_owner_is_caller(db, fields_in["owner_user_id"])
 

@@ -204,6 +204,7 @@ CALL_OUTCOMES = {
     4: "demo_scheduled",
     5: "demo_attended",
     6: "demo_no_show",
+    7: "converted",
 }
 
 # §6.27 Job board
@@ -220,7 +221,7 @@ JOB_BOARDS = {
 }
 
 # §6.28 Job board posting status
-JOB_BOARD_POSTING_STATUSES = {0: "pending", 1: "posted", 2: "failed", 3: "removed", 4: "stopped"}
+JOB_BOARD_POSTING_STATUSES = {0: "queued", 1: "posted", 2: "failed", 3: "removed", 4: "stopped"}
 
 
 def reverse(mapping: dict[int, str]) -> dict[str, int]:

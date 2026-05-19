@@ -13,7 +13,7 @@ class CallLogCreate(BaseModel):
     the authenticated user (not accepted from the client) — see §5.5."""
 
     prospect_id: int
-    outcome: int = Field(ge=0, le=6, description="see CALL_OUTCOMES §6.26")
+    outcome: int = Field(ge=0, le=7, description="see CALL_OUTCOMES §6.26")
     callback_at: Optional[datetime] = None
     notes: Optional[str] = None
 
@@ -85,8 +85,9 @@ class DailyStatsOut(BaseModel):
     in_queue: int = Field(description="prospects still eligible to call right now")
     by_outcome: dict[str, int] = Field(
         description=(
-            "{rnr, not_interested, call_back, follow_up, demo_scheduled} "
-            "per §6.26 — every key always present, missing outcomes report 0"
+            "{rnr, not_interested, call_back, follow_up, demo_scheduled, "
+            "demo_attended, demo_no_show, converted} per §6.26 — every key "
+            "always present, missing outcomes report 0"
         )
     )
 

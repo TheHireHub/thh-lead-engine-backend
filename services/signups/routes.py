@@ -11,11 +11,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database_connection.connection import get_db
-from services.admin_users.deps import require_internal
+from services.admin_users.deps import require_admin, require_internal
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
-from services.candidate_outreach.auth import require_service_token
+from services.candidate_outreach.auth import (
+    require_service_token,
+    require_service_token_with_env,
+)
 from services.common.envelope import ok
 from services.companies.crud import CompanyCRUD
 from services.companies.models import Company
@@ -24,6 +27,8 @@ from services.landing_pages.crud import (
     LandingPageVariantCRUD,
     LandingPageVisitCRUD,
 )
+from services.prospect_company_jobs.crud import JobCRUD
+from services.prospect_company_jobs.models import ProspectCompanyJob
 from services.prospects.crud import ProspectCRUD
 from services.prospects.dedupe import find_existing
 from services.prospects.models import Prospect
@@ -135,8 +140,47 @@ async def get_signup_detail(
         company = company_result.scalar_one_or_none()
 
     signup_dict = _serialize(row)
+    # Full event series for this lead — drawer Timeline shows every recorded
+    # touch (partial_signup → OTP requested → verified → onboarded → published),
+    # not just the latest. Cap at 200 — anything past that is noise.
+    events_rows = await SignupCRUD.list_for_lead(
+        db, prospect_id=row.prospect_id, email=row.email, limit=200
+    )
+
+    # Resolve the company for the "Linked Jobs" section. Primary: prospect's
+    # own company_id. Fallback: lookup company by the lead's email domain so
+    # leads whose `company_id` was never backfilled (e.g. partial_signup that
+    # never reached company_onboarded, or a dropped L4 push) still see the
+    # job that exists under their company. Without this fallback, Sales sees
+    # a "Partial" lead with no hint that a job is already live for the same
+    # company.
+    target_company: Optional[Company] = company
+    if target_company is None and row.email and "@" in row.email:
+        candidate_domain = row.email.split("@", 1)[1].strip().lower()
+        if candidate_domain:
+            target_company = await CompanyCRUD.get_by_domain(db, candidate_domain)
+
+    jobs_payload: list[dict] = []
+    if target_company is not None:
+        jobs_rows = await JobCRUD.list_for_company(db, target_company.id)
+        for j in jobs_rows:
+            jobs_payload.append({
+                "id": j.id,
+                "title": j.title,
+                "status": j.status,
+                "paid_status": j.paid_status,
+                "source": j.source,
+                "posted_at": j.posted_at.isoformat() if j.posted_at else None,
+                "opened_at": j.opened_at.isoformat() if j.opened_at else None,
+                "total_applicants": j.total_applicants,
+                "expectation_target": j.expectation_target,
+                "company_id": j.company_id,
+            })
+
     detail = {
         "signup": signup_dict,
+        "events": [_serialize(e) for e in events_rows],
+        "jobs": jobs_payload,
         "prospect": None,
         "company": None,
     }
@@ -369,7 +413,7 @@ async def verify_otp(
 async def inbound_lead_event(
     payload: InboundLeadEvent,
     db: AsyncSession = Depends(get_db),
-    _auth: None = Depends(require_service_token),
+    inbound_environment: int = Depends(require_service_token_with_env),
 ) -> dict:
     """
     HH-BE pushes one lead event here. Idempotent on `dedup_key` via
@@ -382,6 +426,11 @@ async def inbound_lead_event(
       - otp_verified / company_onboarded
         → same as above PLUS set_registered + set_thh_user_id, signups
           row gets otp_verified_at=NOW.
+
+    `inbound_environment` is derived from which X-Service-Token the
+    sender used (Feature A). Brand-new prospects + companies get tagged
+    with it on insert; existing rows are left as-is (legacy NULL rows
+    stay visible in both env views, per locked plan).
     """
     if not payload.email and not payload.thh_user_id:
         raise HTTPException(status_code=400, detail="email or thh_user_id required")
@@ -392,6 +441,7 @@ async def inbound_lead_event(
         provider=_WEBHOOK_PROVIDER_THH,
         external_event_id=payload.dedup_key,
         payload_json=payload.model_dump(mode="json"),
+        environment=inbound_environment,
     )
     if was_duplicate:
         return ok(
@@ -423,6 +473,7 @@ async def inbound_lead_event(
                 last_name=payload.last_name,
                 source_channel=_CHANNEL_HH_SIGNUP,
                 stage=_STAGE_CURIOUS,
+                environment=inbound_environment,
             )
         elif prospect is not None:
             # Enrich blanks; never overwrite non-null fields.
@@ -455,6 +506,7 @@ async def inbound_lead_event(
                 linkedin_url=payload.company_linkedin_url,
                 industry=payload.company_industry,
                 size=payload.company_size,
+                environment=inbound_environment,
             )
             # Enrich blanks on subsequent pushes (e.g. L1 dropped a domain, L3
             # later supplies linkedin + industry).
@@ -555,3 +607,47 @@ async def inbound_lead_event(
     except Exception as exc:  # noqa: BLE001
         await WebhookDeliveryCRUD.mark_failed(db, wd_row, str(exc)[:1000])
         raise HTTPException(status_code=500, detail=f"ingest failed: {exc}")
+
+
+@router.delete("/lead/{signup_id}")
+async def delete_lead(
+    signup_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_admin),
+) -> dict:
+    """Admin-only nuke for the entire lead grouping behind one signup row.
+    Test-data cleanup affordance — Sales asked for a one-click "remove this
+    lead so it stops cluttering the list" button. Delegates the SQL +
+    soft-delete chain to `SignupCRUD.delete_lead_grouping` so the route
+    stays thin."""
+    anchor = await SignupCRUD.get_by_id(db, signup_id)
+    if anchor is None:
+        raise HTTPException(status_code=404, detail="signup not found")
+
+    result = await SignupCRUD.delete_lead_grouping(db, anchor)
+    if not result["bound"]:
+        raise HTTPException(
+            status_code=422,
+            detail="signup has neither prospect_id nor email — refuse to delete",
+        )
+
+    await AuditLogCRUD.record(
+        db,
+        actor_user_id=user.id,
+        entity_type="signup",
+        entity_id=signup_id,
+        action="lead_delete",
+        after_json={
+            **result["bound"],
+            "deleted_signups": result["deleted_signups"],
+            "deleted_prospect_id": result["deleted_prospect_id"],
+        },
+    )
+
+    return ok(
+        {
+            "deleted_signups": result["deleted_signups"],
+            "deleted_prospect_id": result["deleted_prospect_id"],
+        },
+        message="lead deleted",
+    )

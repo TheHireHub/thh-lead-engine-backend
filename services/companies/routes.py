@@ -16,6 +16,7 @@ from services.admin_users.deps import (
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 
 from .crud import CompanyCRUD
 from .enums import COMPANY_SOURCES, get_label
@@ -42,6 +43,7 @@ async def list_companies(
     q: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    environment: int | None = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     # Caller needs the dropdown to attach a self-sourced lead to the right
     # company on the Sales Dashboard Add-Lead modal (RBAC narrow-widening).
@@ -55,6 +57,7 @@ async def list_companies(
         q=q,
         limit=limit,
         offset=offset,
+        environment=environment,
     )
     return ok([_serialize(c) for c in companies])
 

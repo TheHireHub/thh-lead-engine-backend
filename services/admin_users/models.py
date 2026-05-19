@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Index, String, func
+from sqlalchemy import BigInteger, DateTime, Index, SmallInteger, String, func
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,6 +39,11 @@ class AdminUser(Base):
         String(7),
         nullable=True,
         comment="stable hex (#RRGGBB) for avatar tile; NULL = derive client-side from user id",
+    )
+    preferred_environment: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        comment="UI default for stage/prod filter pill (0=stage, 1=prod, NULL=All)",
     )
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

@@ -19,8 +19,12 @@ from services.admin_users.deps import (
 )
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
-from services.candidate_outreach.auth import require_service_token
+from services.candidate_outreach.auth import (
+    require_service_token,
+    require_service_token_with_env,
+)
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 from services.companies.crud import CompanyCRUD
 from services.webhooks.crud import WebhookDeliveryCRUD
 
@@ -63,7 +67,23 @@ from .schemas import (
 )
 from .models import ProspectCompanyJob
 
+from services.integrations.thh_backend_jd import ThhJdFetchError, fetch_full_job
+
 router = APIRouter(prefix="/api/prospect-company-jobs", tags=["prospect_company_jobs"])
+
+
+class ThhLinkRequest(BaseModel):
+    """Body for PATCH /{id}/thh-link — sets `thh_job_id` on a LEADS row.
+
+    `environment` is optional: if the row already has a non-NULL `environment`
+    tag the caller can omit it. If the row is legacy (NULL env), the
+    caller must specify which env the supplied `thh_job_id` belongs to.
+    """
+
+    thh_job_id: int = Field(..., gt=0, description="HH-BE jobs.id")
+    environment: Optional[int] = Field(
+        default=None, ge=0, le=1, description="0=stage, 1=prod (required if row.env is NULL)"
+    )
 
 
 # --------------------------------------------------------------- serializers
@@ -107,6 +127,7 @@ async def list_jobs(
     assigned_to_csm_user_id: Optional[int] = None,
     limit: int = 100,
     offset: int = 0,
+    environment: Optional[int] = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_internal),
 ) -> dict:
@@ -121,6 +142,7 @@ async def list_jobs(
         assigned_to_csm_user_id=assigned_to_csm_user_id,
         limit=limit,
         offset=offset,
+        environment=environment,
     )
     return ok([_serialize_job(r) for r in rows])
 
@@ -129,12 +151,17 @@ async def list_jobs(
 async def grouped_by_company(
     status: Optional[int] = Query(default=None, ge=0, le=4),
     paid_status: Optional[int] = Query(default=None, ge=0, le=2),
+    environment: Optional[int] = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_internal),
 ) -> dict:
     """For the design's company-grouped CSM view (Schema doc §5.4 / §5.2)."""
     rows = await JobCRUD.list_filtered(
-        db, status=status, paid_status=paid_status, limit=1000
+        db,
+        status=status,
+        paid_status=paid_status,
+        environment=environment,
+        limit=1000,
     )
     grouped = group_by_company(rows)
     out = [
@@ -174,6 +201,193 @@ async def get_job(job_id: int, db: AsyncSession = Depends(get_db),
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return ok(_serialize_job(job))
+
+
+# ----------------------------------------------------- Feature B: JD fetch
+#
+# Two endpoints power the LEADS Jobs Board "View JD" button:
+#
+#   PATCH /{job_id}/thh-link    one-time linker (FE first-click modal)
+#   GET   /{job_id}/thh-job-data passthrough fetch from HH-BE
+#
+# We never cache the upstream payload in the LEADS DB — the modal always
+# shows live data. Storing `thh_job_id` is metadata only.
+
+
+@router.patch("/{job_id}/thh-link")
+async def link_thh_job(
+    job_id: int,
+    payload: ThhLinkRequest,
+    db: AsyncSession = Depends(get_db),
+    # Linking is a CSM workflow (job-board side); BDR/Sales shouldn't be
+    # able to silently re-point a row at a different HH-BE job. Admin
+    # included via require_csm.
+    _user: AdminUser = Depends(require_csm),
+) -> dict:
+    """Persist the HH-BE `jobs.id` (and optionally the env) for this row.
+
+    Idempotent: re-submitting the same link is a no-op. If the row was
+    legacy (env=NULL) and the caller supplies an env in the body, the
+    row's env is upgraded so the next /thh-job-data call knows which
+    host to hit.
+    """
+    job = await JobCRUD.get_by_id(db, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+
+    if job.environment is None and payload.environment is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "row is legacy (environment=NULL); please specify `environment` "
+                "(0=stage, 1=prod) so we know which HH-BE host to call"
+            ),
+        )
+
+    dirty = False
+    if job.thh_job_id != payload.thh_job_id:
+        job.thh_job_id = payload.thh_job_id
+        dirty = True
+    if payload.environment is not None and job.environment != payload.environment:
+        job.environment = payload.environment
+        dirty = True
+    if dirty:
+        await db.commit()
+        await db.refresh(job)
+        await AuditLogCRUD.record(
+            db,
+            entity_type="prospect_company_job",
+            entity_id=job.id,
+            action="thh_link_set",
+            after_json={
+                "thh_job_id": job.thh_job_id,
+                "environment": job.environment,
+            },
+        )
+    return ok(
+        {
+            "id": job.id,
+            "thh_job_id": job.thh_job_id,
+            "environment": job.environment,
+        }
+    )
+
+
+@router.get("/{job_id}/thh-job-data")
+async def get_thh_job_data(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    # Mirrors PATCH /thh-link scope. JD payload may include
+    # `recruiter_jd` and `no_poach_companies` — confidential to CSM/Admin.
+    _user: AdminUser = Depends(require_csm),
+) -> dict:
+    """Passthrough fetch of JD + every search field from HH-BE.
+
+    Returns 409 with `{requires_link: true, environment_required: bool}`
+    when the row is missing either `thh_job_id` or `environment` — the
+    FE shows the link modal in response. On success, returns the full
+    upstream payload (B.0 contract) in the standard envelope.
+    """
+    job = await JobCRUD.get_by_id(db, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+
+    if not job.thh_job_id or job.environment is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "requires_link": True,
+                "environment_required": job.environment is None,
+                "row_id": job.id,
+            },
+        )
+
+    try:
+        data = await fetch_full_job(job.thh_job_id, job.environment)
+    except ThhJdFetchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    # Persist the upstream applicant count so the Jobs Board can show it
+    # without re-hitting HH-BE on every list render. HH-BE is the single
+    # source of truth — we never increment locally.
+    upstream_applicants = data.get("applicant_count") if isinstance(data, dict) else None
+    if isinstance(upstream_applicants, int) and upstream_applicants != job.total_applicants:
+        job.total_applicants = upstream_applicants
+        await db.commit()
+        await db.refresh(job)
+
+    return ok(
+        {
+            "row_id": job.id,
+            "thh_job_id": job.thh_job_id,
+            "environment": job.environment,
+            "total_applicants": job.total_applicants,
+            "job": data,
+        }
+    )
+
+
+@router.post("/sync-applicants")
+async def sync_applicants_from_thh(
+    environment: Optional[int] = Depends(current_environment_from_query),
+    db: AsyncSession = Depends(get_db),
+    # Read-write batch op — same scope as the per-row JD fetch.
+    _user: AdminUser = Depends(require_csm),
+) -> dict:
+    """Refresh `total_applicants` on every linked LEADS row from HH-BE.
+
+    Scoped to the current env toggle (NULL legacy rows are skipped — they
+    can't be safely fetched without an explicit env). Runs upstream calls
+    in parallel with a small bound so a slow HH-BE host doesn't stall the
+    whole board.
+    """
+    import asyncio
+
+    stmt = select(ProspectCompanyJob).where(
+        ProspectCompanyJob.deleted_at.is_(None),
+        ProspectCompanyJob.thh_job_id.is_not(None),
+        ProspectCompanyJob.environment.is_not(None),
+    )
+    if environment is not None:
+        stmt = stmt.where(ProspectCompanyJob.environment == environment)
+    result = await db.execute(stmt)
+    rows = list(result.scalars().all())
+    if not rows:
+        return ok({"synced": 0, "skipped": 0, "errors": 0})
+
+    sem = asyncio.Semaphore(8)  # bound concurrency against HH-BE
+
+    async def _fetch_one(row: ProspectCompanyJob) -> tuple[int, int | None]:
+        async with sem:
+            try:
+                data = await fetch_full_job(row.thh_job_id, row.environment)
+                count = data.get("applicant_count") if isinstance(data, dict) else None
+                return row.id, int(count) if isinstance(count, int) else None
+            except ThhJdFetchError:
+                return row.id, None
+            except Exception:
+                return row.id, None
+
+    results = await asyncio.gather(*[_fetch_one(r) for r in rows])
+
+    by_id = {row.id: row for row in rows}
+    synced = errors = skipped = 0
+    for row_id, count in results:
+        if count is None:
+            errors += 1
+            continue
+        row = by_id.get(row_id)
+        if row is None:
+            skipped += 1
+            continue
+        if row.total_applicants != count:
+            row.total_applicants = count
+            synced += 1
+        else:
+            skipped += 1
+    if synced:
+        await db.commit()
+    return ok({"synced": synced, "skipped": skipped, "errors": errors})
 
 
 @router.get("/{job_id}/detail")
@@ -384,7 +598,7 @@ def _extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
 async def inbound_job_board_event(
     payload: InboundJobBoardEvent,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(require_service_token),
+    inbound_environment: int = Depends(require_service_token_with_env),
 ) -> dict:
     """HH-BE posts here when a customer publishes a job on app.thehirehub.ai.
 
@@ -393,6 +607,11 @@ async def inbound_job_board_event(
     push creates the row; later pushes patch mutable fields (paid_status,
     posting_url, location, title) without touching CSM-curated fields
     (assigned_to_csm_user_id, expectation_target, notes, status).
+
+    `inbound_environment` is derived from which X-Service-Token was used
+    (stage vs prod). New anchor rows (companies + prospect_company_jobs +
+    webhook_deliveries) get stamped with it so the LEADS env toggle
+    filters them correctly.
     """
     # 1) Idempotency check via webhook_deliveries.
     wd_row, was_duplicate = await WebhookDeliveryCRUD.record(
@@ -400,6 +619,7 @@ async def inbound_job_board_event(
         provider=_WEBHOOK_PROVIDER_THH_JOB_BOARD,
         external_event_id=payload.dedup_key,
         payload_json=payload.model_dump(mode="json"),
+        environment=inbound_environment,
     )
     if was_duplicate:
         return ok(
@@ -430,6 +650,7 @@ async def inbound_job_board_event(
                 domain=domain,
                 name=payload.company_name or domain,
                 source=2,  # COMPANY_SOURCES §6.4 = signup
+                environment=inbound_environment,
             )
 
         if company is None:
@@ -451,6 +672,7 @@ async def inbound_job_board_event(
                 domain=synthetic_domain,
                 name=payload.company_name or "Internal promo",
                 source=2,
+                environment=inbound_environment,
             )
 
         # 3) Upsert on (source, source_external_id) UNIQUE.
@@ -483,6 +705,10 @@ async def inbound_job_board_event(
                 # column. The HH publish timestamp lives on `opened_at`.
                 "opened_at": payload.published_at,
                 "status": 0,  # open
+                # Feature A: stamp env so the LEADS toggle filters cleanly.
+                # Also enables Feature B's JD-fetch to pick the right host.
+                "thh_job_id": payload.thh_job_id,
+                "environment": inbound_environment,
             }
             job = await JobCRUD.create(db, **job_fields)
             await AuditLogCRUD.record(
@@ -738,12 +964,12 @@ async def update_board_applicants(
     row = await JobBoardCRUD.update_applicant_count(
         db, row, applicant_count=payload.applicant_count
     )
-    # Recompute the job-level total + at_risk_at / target_met_at ratchet.
+    # Recompute the job-level total + target_met_at ratchet. The board
+    # row's applicant_count was already saved above (by row id); this
+    # helper just sums all current rows for this job.
     job = await JobCRUD.get_by_id(db, row.prospect_company_job_id)
     if job is not None:
-        await JobCRUD.record_applicants(
-            db, job, board=row.board, applicant_count=row.applicant_count
-        )
+        await JobCRUD.record_applicants(db, job)
     await JobHistoryCRUD.record(
         db,
         prospect_company_job_id=row.prospect_company_job_id,
@@ -765,15 +991,31 @@ async def record_applicants(
     Set the per-board applicant count and recompute total_applicants.
     Sets target_met_at once on the first time total >= expectation_target
     (Arch-41 one-way ratchet).
+
+    With multiple postings per (job, board) legal (re-post after halt), we
+    target the LATEST live row for the board. Callers that need to edit a
+    specific historical posting should use `POST /boards/{row_id}/applicants`.
     """
     job = await JobCRUD.get_by_id(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
 
-    was_met = job.target_met_at is not None
-    job = await JobCRUD.record_applicants(
-        db, job, board=payload.board, applicant_count=payload.applicant_count
+    # Pick the most recent non-deleted board row for this (job, board).
+    all_rows = await JobBoardCRUD.list_for_job(db, job.id)
+    target_row = next(
+        (r for r in reversed(all_rows) if r.board == payload.board),
+        None,
     )
+    if target_row is None:
+        raise HTTPException(
+            status_code=404, detail=f"no board posting for board={payload.board}"
+        )
+    await JobBoardCRUD.update_applicant_count(
+        db, target_row, applicant_count=payload.applicant_count
+    )
+
+    was_met = job.target_met_at is not None
+    job = await JobCRUD.record_applicants(db, job)
     if not was_met and job.target_met_at is not None:
         await AuditLogCRUD.record(
             db,

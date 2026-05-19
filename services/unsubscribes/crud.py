@@ -52,20 +52,25 @@ class UnsubscribeCRUD:
         existing = await UnsubscribeCRUD.get_by_email(db, email)
         if existing:
             return existing, False
-        row = Unsubscribe(
-            email=email,
-            prospect_id=prospect_id,
-            source_campaign_id=source_campaign_id,
-            reason=reason,
-        )
-        db.add(row)
         try:
-            await db.commit()
+            async with db.begin_nested():
+                # SAVEPOINT scope — a UNIQUE(email) race here must NOT expire
+                # ORM instances owned by the outer caller. Top-level rollback
+                # would do that and triggers MissingGreenlet on the caller's
+                # next sync attribute access.
+                row = Unsubscribe(
+                    email=email,
+                    prospect_id=prospect_id,
+                    source_campaign_id=source_campaign_id,
+                    reason=reason,
+                )
+                db.add(row)
+                await db.flush()
         except IntegrityError:
-            await db.rollback()
             existing = await UnsubscribeCRUD.get_by_email(db, email)
             if existing:
                 return existing, False
             raise
+        await db.commit()
         await db.refresh(row)
         return row, True

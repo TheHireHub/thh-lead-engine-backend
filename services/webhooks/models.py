@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, BigInteger, DateTime, Index, String, Text, UniqueConstraint, func,
+    JSON, BigInteger, DateTime, Index, SmallInteger, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import Mapped, mapped_column
@@ -20,6 +20,7 @@ class WebhookDelivery(Base):
         UniqueConstraint("provider", "external_event_id", name="uk_wd_provider_event"),
         Index("idx_wd_status", "status"),
         Index("idx_wd_received_at", "received_at"),
+        Index("ix_webhook_deliveries_environment", "environment"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
@@ -32,3 +33,8 @@ class WebhookDelivery(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    environment: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        comment="0=stage, 1=prod, NULL=legacy (visible in both views)",
+    )

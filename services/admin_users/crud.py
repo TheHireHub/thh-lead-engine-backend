@@ -127,3 +127,18 @@ class AdminUserCRUD:
         await db.commit()
         await db.refresh(user)
         return user
+
+    @staticmethod
+    async def set_preferred_environment(
+        db: AsyncSession, user: AdminUser, environment: Optional[int]
+    ) -> AdminUser:
+        """Persist (or clear) the stage/prod toggle for this user.
+
+        Distinct from `update()` because passing `None` here is meaningful
+        — it clears the preference back to "All". The generic `update()`
+        helper skips None to support partial-payload PATCH semantics.
+        """
+        user.preferred_environment = environment
+        await db.commit()
+        await db.refresh(user)
+        return user

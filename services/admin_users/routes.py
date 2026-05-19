@@ -30,6 +30,7 @@ from .models import AdminUser
 from .schemas import (
     AdminUserCreate,
     AdminUserOut,
+    AdminUserSelfUpdate,
     AdminUserUpdate,
     LoginRequest,
     TeamMemberOut,
@@ -98,6 +99,23 @@ async def logout(
 
 @auth_router.get("/me")
 async def me(user: AdminUser = Depends(current_user)) -> dict:
+    return ok({"user": _serialize(user)})
+
+
+@auth_router.patch("/me")
+async def update_me(
+    payload: AdminUserSelfUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(current_user),
+) -> dict:
+    """Persist per-user preferences. Today the only writable field is the
+    stage/prod toggle (`preferred_environment`). Passing `null` clears
+    the preference back to "All". Returns the refreshed user payload."""
+    body = payload.model_dump(exclude_unset=True)
+    if "preferred_environment" in body:
+        user = await AdminUserCRUD.set_preferred_environment(
+            db, user, body["preferred_environment"]
+        )
     return ok({"user": _serialize(user)})
 
 

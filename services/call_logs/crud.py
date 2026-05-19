@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.audit.crud import AuditLogCRUD
 from services.common.tz import business_offset_str
+from services.prospects.crud import ProspectCRUD
 from services.prospects.models import Prospect, ProspectStageHistory
 
 from .models import CallLog
@@ -90,9 +91,12 @@ def _next_open_callback_subq(*, caller_user_id: int | None = None):
         cl.c.callback_at.is_not(None),
         cl.c.outcome.in_((2, 3, 4)),
     )
-    resolving_for_2 = (1, 4, 5, 6)
-    resolving_for_3 = (1, 4, 5, 6)
-    resolving_for_4 = (5, 6)
+    # converted (7) is terminal and resolves any pending callback / demo:
+    # once the prospect is a paying customer, the rep shouldn't see leftover
+    # follow-up cards in Upcoming / Callbacks / Demos.
+    resolving_for_2 = (1, 4, 5, 6, 7)
+    resolving_for_3 = (1, 4, 5, 6, 7)
+    resolving_for_4 = (5, 6, 7)
     kill = (
         _select(cl2.c.id)
         .where(
@@ -156,7 +160,8 @@ class CallLogCRUD:
             # scheduled when attended; check others").
             from sqlalchemy import and_
             cl2 = CallLog.__table__.alias("cl2")
-            superseding = (5, 6) if outcome == 4 else (1, 4, 5, 6)
+            # 7 (converted) is terminal — also supersedes pending callbacks / demos.
+            superseding = (5, 6, 7) if outcome == 4 else (1, 4, 5, 6, 7)
             stmt = stmt.where(
                 ~select(cl2.c.id).where(
                     and_(
@@ -222,6 +227,18 @@ class CallLogCRUD:
                         actor_user_id=None,
                         after_json={"rnr_count": prospect.rnr_count},
                     )
+            elif outcome == 7 and prospect.stage != 2:  # converted (§6.26)
+                # Caller marks the lead as a paying customer mid-call. Flip
+                # stage→converted, stamp converted_at, write history+audit.
+                # change_stage() commits the txn (including the call_log row
+                # already flushed above), so the outer commit is a no-op.
+                await ProspectCRUD.change_stage(
+                    db,
+                    prospect,
+                    to_stage=2,
+                    reason="call_outcome_converted",
+                    changed_by_user_id=fields.get("caller_user_id"),
+                )
             # NOTE: previously `not_interested` (outcome=1) auto-flipped
             # the prospect's stage to LOST, which dropped the row from
             # the queue and confused callers ("the lead I just logged
@@ -411,8 +428,9 @@ class CallLogCRUD:
                 .exists()
             )
 
-        demo_superseded = _is_later((5, 6))
-        callback_superseded = _is_later((1, 4, 5, 6))
+        # converted (7) is terminal — also supersedes open demos and callbacks.
+        demo_superseded = _is_later((5, 6, 7))
+        callback_superseded = _is_later((1, 4, 5, 6, 7))
         demo_open_pid = case((~demo_superseded, CallLog.prospect_id), else_=null())
         callback_open_pid = case(
             (~callback_superseded, CallLog.prospect_id), else_=null()
@@ -440,7 +458,9 @@ class CallLogCRUD:
                 out[o] = int(cb_open or 0)
             elif o == 4:
                 out[o] = int(demo_open or 0)
-            elif o in (5, 6):
+            elif o in (5, 6, 7):
+                # Terminal outcomes — count DISTINCT prospects (re-logging the
+                # same conversion shouldn't double-count the KPI).
                 out[o] = int(uniq or 0)
             else:
                 out[o] = int(raw or 0)
@@ -601,8 +621,9 @@ class CallLogCRUD:
                 .exists()
             )
 
-        demo_superseded = _is_later((5, 6))
-        callback_superseded = _is_later((1, 4, 5, 6))
+        # converted (7) is terminal — also supersedes open demos and callbacks.
+        demo_superseded = _is_later((5, 6, 7))
+        callback_superseded = _is_later((1, 4, 5, 6, 7))
         demo_open_pid = case((~demo_superseded, CallLog.prospect_id), else_=null())
         callback_open_pid = case(
             (~callback_superseded, CallLog.prospect_id), else_=null()
@@ -629,7 +650,7 @@ class CallLogCRUD:
                 out[o] = int(cb_open or 0)
             elif o == 4:
                 out[o] = int(demo_open or 0)
-            elif o in (5, 6):
+            elif o in (5, 6, 7):
                 out[o] = int(uniq or 0)
             else:
                 out[o] = int(raw or 0)
