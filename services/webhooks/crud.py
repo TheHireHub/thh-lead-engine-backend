@@ -16,6 +16,8 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
+
 from .models import WebhookDelivery
 
 
@@ -53,6 +55,7 @@ class WebhookDeliveryCRUD:
         external_event_id: str,
         payload_json: dict,
         signature: Optional[str] = None,
+        environment: Optional[int] = None,
     ) -> tuple[WebhookDelivery, bool]:
         """Returns (row, was_duplicate).
 
@@ -61,6 +64,9 @@ class WebhookDeliveryCRUD:
           - status=2 failed → reset to received, refresh payload, allow replay
             (a prior crash dropped the event; re-pushing with the same
             dedup_key must succeed, otherwise the failure is permanent).
+
+        `environment` is stamped on the row only when creating a new
+        delivery. Replay-after-failure preserves the original env tag.
         """
         existing = await WebhookDeliveryCRUD.get_by_external_id(db, provider, external_event_id)
         if existing is not None:
@@ -75,6 +81,7 @@ class WebhookDeliveryCRUD:
             external_event_id=external_event_id,
             signature=signature,
             payload_json=payload_json,
+            environment=environment,
         )
         db.add(row)
         await db.commit()
@@ -107,13 +114,17 @@ class WebhookDeliveryCRUD:
 
     @staticmethod
     async def list_failed(
-        db: AsyncSession, *, limit: int = 50
+        db: AsyncSession, *, limit: int = 50, environment: Optional[int] = None
     ) -> list[WebhookDelivery]:
         """Most recent failed deliveries (status=2), newest first."""
-        result = await db.execute(
+        stmt = (
             select(WebhookDelivery)
             .where(WebhookDelivery.status == 2)
             .order_by(WebhookDelivery.received_at.desc())
             .limit(limit)
         )
+        env_clause = env_filter_clause(WebhookDelivery.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
+        result = await db.execute(stmt)
         return list(result.scalars().all())

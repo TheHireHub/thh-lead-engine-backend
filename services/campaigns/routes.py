@@ -14,6 +14,7 @@ from services.admin_users.deps import (
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 from services.prospects.crud import ProspectCRUD
 
 from .crud import CampaignCRUD, CampaignEventCRUD, CampaignProspectCRUD
@@ -64,11 +65,17 @@ async def list_campaigns(
     channel: int | None = None,
     limit: int = 100,
     offset: int = 0,
+    environment: int | None = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_internal),
 ) -> dict:
     rows = await CampaignCRUD.list_all(
-        db, status=status, channel=channel, limit=limit, offset=offset
+        db,
+        status=status,
+        channel=channel,
+        limit=limit,
+        offset=offset,
+        environment=environment,
     )
     return ok([_serialize(c) for c in rows])
 

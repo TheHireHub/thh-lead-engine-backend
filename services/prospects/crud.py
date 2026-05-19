@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.audit.crud import AuditLogCRUD
+from services.common.environment import env_filter_clause
 
 from .models import (
     Prospect,
@@ -86,11 +87,18 @@ class ProspectCRUD:
 
     @staticmethod
     async def list_by_stage(
-        db: AsyncSession, stage: Optional[int] = None, limit: int = 100, offset: int = 0
+        db: AsyncSession,
+        stage: Optional[int] = None,
+        limit: int = 100,
+        offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[Prospect]:
         stmt = select(Prospect).where(Prospect.deleted_at.is_(None))
         if stage is not None:
             stmt = stmt.where(Prospect.stage == stage)
+        env_clause = env_filter_clause(Prospect.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(Prospect.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())

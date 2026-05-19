@@ -15,8 +15,8 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
-    BigInteger, DateTime, ForeignKey, Index, Integer, Numeric, String, Text,
-    UniqueConstraint, func,
+    BigInteger, DateTime, ForeignKey, Index, Integer, Numeric, SmallInteger,
+    String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import Mapped, mapped_column
@@ -41,6 +41,8 @@ class ProspectCompanyJob(Base):
         Index("idx_pcj_target_met_at", "target_met_at"),
         Index("idx_pcj_assigned_csm", "assigned_to_csm_user_id"),
         Index("idx_pcj_deleted_at", "deleted_at"),
+        Index("ix_prospect_company_jobs_environment", "environment"),
+        Index("ix_pcj_thh_job_id", "thh_job_id"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
@@ -85,6 +87,22 @@ class ProspectCompanyJob(Base):
     created_by_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("admin_users.id", ondelete="SET NULL", onupdate="CASCADE"), nullable=True
     )
+
+    # Cross-platform JD fetch (Feature B): metadata pointer back to the HH-BE
+    # `jobs.id` so the LEADS Jobs Board "View JD" button can fetch live data
+    # from stage HH-BE or prod HH-BE based on the row's `environment`.
+    thh_job_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="HH-BE jobs.id; combined with `environment` to pick stage vs prod host",
+    )
+
+    environment: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        comment="0=stage, 1=prod, NULL=legacy (visible in both views)",
+    )
+
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[datetime] = mapped_column(

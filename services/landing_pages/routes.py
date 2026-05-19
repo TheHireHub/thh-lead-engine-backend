@@ -13,6 +13,7 @@ from services.admin_users.deps import require_dashboard_read, require_growth, re
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 from services.prospects.promotion import promote_to_curious_on_visit
 
 from .crud import LandingPageCRUD, LandingPageVariantCRUD, LandingPageVisitCRUD
@@ -43,6 +44,7 @@ async def list_pages(
     template_key: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
+    environment: int | None = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_internal),
 ) -> dict:
@@ -53,6 +55,7 @@ async def list_pages(
         template_key=template_key,
         limit=limit,
         offset=offset,
+        environment=environment,
     )
     return ok([LandingPageOut.model_validate(p).model_dump() for p in pages])
 

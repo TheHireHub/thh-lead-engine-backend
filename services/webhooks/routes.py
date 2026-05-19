@@ -20,6 +20,7 @@ from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
 from services.common.envelope import fail, ok
+from services.common.environment import current_environment_from_query
 from services.prospects.crud import ProspectCRUD
 from services.prospects.models import Prospect, ProspectChannel
 
@@ -411,13 +412,14 @@ async def apollo_webhook(
 @router.get("/deliveries/failed")
 async def list_failed_deliveries(
     limit: int = 50,
+    environment: int | None = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_admin),
 ) -> dict:
     """Admin-only. Lists the most recent failed webhook deliveries +
     a total count. Powers the management-dashboard alert widget so
     silent push drops surface within hours instead of days."""
-    rows = await WebhookDeliveryCRUD.list_failed(db, limit=limit)
+    rows = await WebhookDeliveryCRUD.list_failed(db, limit=limit, environment=environment)
     count = await WebhookDeliveryCRUD.count_failed(db)
     items: list[dict] = []
     for r in rows:

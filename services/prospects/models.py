@@ -22,6 +22,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -55,6 +56,7 @@ class Prospect(Base):
         Index("idx_prospects_first_applicant_received_at", "first_applicant_received_at"),
         Index("idx_prospects_converted_at", "converted_at"),
         Index("idx_prospects_deleted_at", "deleted_at"),
+        Index("ix_prospects_environment", "environment"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
@@ -97,6 +99,12 @@ class Prospect(Base):
     jobs_created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     applicants_received_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     rnr_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="auto-marks not_interested at 3")
+
+    environment: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        comment="0=stage, 1=prod, NULL=legacy (visible in both views)",
+    )
 
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())

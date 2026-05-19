@@ -15,7 +15,10 @@ from services.admin_users.deps import require_admin, require_internal
 from services.admin_users.models import AdminUser
 from services.audit.crud import AuditLogCRUD
 from services.campaigns.crud import CampaignEventCRUD
-from services.candidate_outreach.auth import require_service_token
+from services.candidate_outreach.auth import (
+    require_service_token,
+    require_service_token_with_env,
+)
 from services.common.envelope import ok
 from services.companies.crud import CompanyCRUD
 from services.companies.models import Company
@@ -410,7 +413,7 @@ async def verify_otp(
 async def inbound_lead_event(
     payload: InboundLeadEvent,
     db: AsyncSession = Depends(get_db),
-    _auth: None = Depends(require_service_token),
+    inbound_environment: int = Depends(require_service_token_with_env),
 ) -> dict:
     """
     HH-BE pushes one lead event here. Idempotent on `dedup_key` via
@@ -423,6 +426,11 @@ async def inbound_lead_event(
       - otp_verified / company_onboarded
         → same as above PLUS set_registered + set_thh_user_id, signups
           row gets otp_verified_at=NOW.
+
+    `inbound_environment` is derived from which X-Service-Token the
+    sender used (Feature A). Brand-new prospects + companies get tagged
+    with it on insert; existing rows are left as-is (legacy NULL rows
+    stay visible in both env views, per locked plan).
     """
     if not payload.email and not payload.thh_user_id:
         raise HTTPException(status_code=400, detail="email or thh_user_id required")
@@ -433,6 +441,7 @@ async def inbound_lead_event(
         provider=_WEBHOOK_PROVIDER_THH,
         external_event_id=payload.dedup_key,
         payload_json=payload.model_dump(mode="json"),
+        environment=inbound_environment,
     )
     if was_duplicate:
         return ok(
@@ -464,6 +473,7 @@ async def inbound_lead_event(
                 last_name=payload.last_name,
                 source_channel=_CHANNEL_HH_SIGNUP,
                 stage=_STAGE_CURIOUS,
+                environment=inbound_environment,
             )
         elif prospect is not None:
             # Enrich blanks; never overwrite non-null fields.
@@ -496,6 +506,7 @@ async def inbound_lead_event(
                 linkedin_url=payload.company_linkedin_url,
                 industry=payload.company_industry,
                 size=payload.company_size,
+                environment=inbound_environment,
             )
             # Enrich blanks on subsequent pushes (e.g. L1 dropped a domain, L3
             # later supplies linkedin + industry).

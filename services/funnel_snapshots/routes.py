@@ -13,6 +13,7 @@ from database_connection.connection import get_db
 from services.admin_users.deps import require_dashboard_read
 from services.admin_users.models import AdminUser
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 
 from .crud import FunnelSnapshotCRUD
 from .enums import CHANNELS, FUNNEL_STAGES, get_label
@@ -56,6 +57,7 @@ async def list_snapshots(
     stage: Optional[int] = None,
     channel: Optional[int] = None,
     mode: SnapshotMode = "daily",
+    environment: Optional[int] = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
@@ -67,7 +69,12 @@ async def list_snapshots(
     `mode=monthly` groups by calendar month.
     """
     rows = await FunnelSnapshotCRUD.list_by_date_range(
-        db, from_date=from_date, to_date=to_date, stage=stage, channel=channel
+        db,
+        from_date=from_date,
+        to_date=to_date,
+        stage=stage,
+        channel=channel,
+        environment=environment,
     )
     if mode == "daily":
         return ok([_serialize(s) for s in rows])

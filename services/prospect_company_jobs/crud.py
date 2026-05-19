@@ -19,6 +19,8 @@ from typing import Iterable, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
+
 from .models import (
     ProspectCompanyJob,
     ProspectCompanyJobBoard,
@@ -79,6 +81,7 @@ class JobCRUD:
         assigned_to_csm_user_id: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[ProspectCompanyJob]:
         """Combined filter for the CSM Board."""
         stmt = select(ProspectCompanyJob).where(ProspectCompanyJob.deleted_at.is_(None))
@@ -96,6 +99,9 @@ class JobCRUD:
             stmt = stmt.where(
                 ProspectCompanyJob.assigned_to_csm_user_id == assigned_to_csm_user_id
             )
+        env_clause = env_filter_clause(ProspectCompanyJob.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(ProspectCompanyJob.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())

@@ -45,9 +45,27 @@ class AdminUserOut(BaseModel):
     thh_user_id: Optional[int]
     daily_call_target: int
     avatar_color: Optional[str]
+    preferred_environment: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="0=stage, 1=prod, None=All (no filter). Drives the Sidebar env pill.",
+    )
     last_login_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
+
+
+class AdminUserSelfUpdate(BaseModel):
+    """PATCH /api/auth/me body — every field optional, only the supplied
+    keys get written. Currently used to persist the stage/prod toggle."""
+
+    preferred_environment: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Pass 0 (stage) or 1 (prod). Send null to clear back to All.",
+    )
 
 
 class LoginRequest(BaseModel):

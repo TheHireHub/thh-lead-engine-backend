@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
-    BigInteger, Date, DateTime, ForeignKey, Index, Integer,
+    BigInteger, Date, DateTime, ForeignKey, Index, Integer, SmallInteger,
     UniqueConstraint, func,
 )
 from sqlalchemy.dialects.mysql import TINYINT
@@ -19,11 +19,12 @@ class FunnelDailySnapshot(Base):
     __tablename__ = "funnel_daily_snapshots"
     __table_args__ = (
         UniqueConstraint(
-            "snapshot_date", "stage", "channel", "owner_user_id",
-            name="uk_fds_dimension",
+            "snapshot_date", "stage", "channel", "owner_user_id", "environment",
+            name="uk_fds_dimension_env",
         ),
         Index("idx_fds_snapshot_date", "snapshot_date"),
         Index("idx_fds_stage", "stage"),
+        Index("ix_funnel_daily_snapshots_environment", "environment"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
@@ -35,4 +36,9 @@ class FunnelDailySnapshot(Base):
         BigInteger, ForeignKey("admin_users.id", ondelete="SET NULL", onupdate="CASCADE"), nullable=True
     )
     prospect_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    environment: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        comment="0=stage, 1=prod, NULL=legacy (visible in both views)",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())

@@ -26,6 +26,7 @@ from services.call_logs.crud import CallLogCRUD
 from services.call_logs.enums import CALL_OUTCOMES
 from services.call_logs.enums import get_label as get_outcome_label
 from services.common.envelope import ok
+from services.common.environment import current_environment_from_query
 from services.email_replies.enums import (
     REPLY_CLASSIFICATIONS,
     REPLY_CLASSIFIED_BY,
@@ -189,6 +190,7 @@ async def list_prospects(
     stage: int | None = None,
     limit: int = 100,
     offset: int = 0,
+    environment: int | None = Depends(current_environment_from_query),
     db: AsyncSession = Depends(get_db),
     _user: AdminUser = Depends(require_dashboard_read),
 ) -> dict:
@@ -198,7 +200,9 @@ async def list_prospects(
     no N+1) so the FE Prospects list can render the call-stage chip
     without a second round-trip. See BACKEND_CHANGES_PENDING.md item 9b.
     """
-    prospects = await ProspectCRUD.list_by_stage(db, stage=stage, limit=limit, offset=offset)
+    prospects = await ProspectCRUD.list_by_stage(
+        db, stage=stage, limit=limit, offset=offset, environment=environment
+    )
     owner_ids = [p.owner_user_id for p in prospects if p.owner_user_id is not None]
     owner_names = await AdminUserCRUD.names_by_ids(db, owner_ids)
     rows = [_serialize(p, owner_names) for p in prospects]

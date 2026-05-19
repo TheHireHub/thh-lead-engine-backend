@@ -23,6 +23,7 @@ class LandingPage(Base):
         Index("idx_lp_company_id", "company_id"),
         Index("idx_lp_source_campaign_id", "source_campaign_id"),
         Index("idx_lp_deleted_at", "deleted_at"),
+        Index("ix_landing_pages_environment", "environment"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
@@ -43,6 +44,11 @@ class LandingPage(Base):
     last_visit_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_by_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("admin_users.id", ondelete="SET NULL", onupdate="CASCADE"), nullable=True
+    )
+    environment: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        comment="0=stage, 1=prod, NULL=legacy (visible in both views)",
     )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())

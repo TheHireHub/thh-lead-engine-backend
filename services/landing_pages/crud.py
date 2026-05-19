@@ -8,6 +8,8 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
+
 from .models import LandingPage, LandingPageVariant, LandingPageVisit
 
 
@@ -35,6 +37,7 @@ class LandingPageCRUD:
         template_key: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[LandingPage]:
         stmt = select(LandingPage).where(LandingPage.deleted_at.is_(None))
         if prospect_id is not None:
@@ -43,6 +46,9 @@ class LandingPageCRUD:
             stmt = stmt.where(LandingPage.company_id == company_id)
         if template_key is not None:
             stmt = stmt.where(LandingPage.template_key == template_key)
+        env_clause = env_filter_clause(LandingPage.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(LandingPage.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())

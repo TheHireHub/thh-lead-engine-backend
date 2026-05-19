@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, BigInteger, DateTime, ForeignKey, Index, String, Text, func,
+    JSON, BigInteger, DateTime, ForeignKey, Index, SmallInteger, String, Text, func,
 )
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import Mapped, mapped_column
@@ -21,6 +21,7 @@ class Campaign(Base):
         Index("idx_campaigns_channel", "channel"),
         Index("idx_campaigns_created_by", "created_by_user_id"),
         Index("idx_campaigns_deleted_at", "deleted_at"),
+        Index("ix_campaigns_environment", "environment"),
         {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
@@ -32,6 +33,11 @@ class Campaign(Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("admin_users.id", ondelete="RESTRICT", onupdate="CASCADE"), nullable=False
+    )
+    environment: Mapped[Optional[int]] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        comment="0=stage, 1=prod, NULL=legacy (visible in both views)",
     )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())

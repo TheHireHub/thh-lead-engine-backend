@@ -9,6 +9,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
+
 from .models import Company
 
 
@@ -36,6 +38,7 @@ class CompanyCRUD:
         q: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[Company]:
         stmt = select(Company).where(Company.deleted_at.is_(None))
         if source is not None:
@@ -49,6 +52,9 @@ class CompanyCRUD:
             stmt = stmt.where(
                 or_(Company.name.ilike(like), Company.domain.ilike(like))
             )
+        env_clause = env_filter_clause(Company.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(Company.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())

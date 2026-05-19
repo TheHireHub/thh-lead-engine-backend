@@ -16,6 +16,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
+
 from .models import Campaign, CampaignEvent, CampaignProspect
 
 
@@ -34,12 +36,16 @@ class CampaignCRUD:
         channel: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
+        environment: Optional[int] = None,
     ) -> list[Campaign]:
         stmt = select(Campaign).where(Campaign.deleted_at.is_(None))
         if status is not None:
             stmt = stmt.where(Campaign.status == status)
         if channel is not None:
             stmt = stmt.where(Campaign.channel == channel)
+        env_clause = env_filter_clause(Campaign.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(Campaign.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return list(result.scalars().all())

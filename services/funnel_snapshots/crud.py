@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.environment import env_filter_clause
 from services.prospects.models import Prospect
 
 from .models import FunnelDailySnapshot
@@ -97,6 +98,7 @@ class FunnelSnapshotCRUD:
         to_date: date,
         stage: Optional[int] = None,
         channel: Optional[int] = None,
+        environment: Optional[int] = None,
     ) -> list[FunnelDailySnapshot]:
         stmt = select(FunnelDailySnapshot).where(
             FunnelDailySnapshot.snapshot_date >= from_date,
@@ -106,6 +108,9 @@ class FunnelSnapshotCRUD:
             stmt = stmt.where(FunnelDailySnapshot.stage == stage)
         if channel is not None:
             stmt = stmt.where(FunnelDailySnapshot.channel == channel)
+        env_clause = env_filter_clause(FunnelDailySnapshot.environment, environment)
+        if env_clause is not None:
+            stmt = stmt.where(env_clause)
         stmt = stmt.order_by(FunnelDailySnapshot.snapshot_date.asc())
         result = await db.execute(stmt)
         return list(result.scalars().all())
